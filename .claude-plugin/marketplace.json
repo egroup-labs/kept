@@ -1,0 +1,14 @@
+{
+  "name": "kept-plugins",
+  "owner": {
+    "name": "egroup-labs"
+  },
+  "plugins": [
+    {
+      "name": "kept-vault",
+      "source": "./mcp",
+      "description": "Read, write, search, and manage your Kept conversation vault",
+      "version": "1.0.0"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+[package]
+name = "kept"
+version = "0.3.1"
+description = "Kept - Local vault for AI conversations"
+authors = ["markmarosi"]
+edition = "2021"
+
+[lib]
+name = "kept_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-drag = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.7"
+tower-http = { version = "0.6", features = ["cors"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+dirs = "5"
+walkdir = "2"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+base64 = "0.22"
+log = "0.4"
+env_logger = "0.11"
+cozo = { version = "0.7.6", default-features = false, features = ["storage-rocksdb", "rayon"] }
+async-trait = "0.1"
+futures = "0.3"
+rayon = "1.11.0"
+petgraph = "0.6"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+arboard = "3"
+regex = "1"
+pdf-extract = "0.7"
+html2text = "0.12"
+calamine = "0.26"
+
+[dev-dependencies]
+tempfile = "3"

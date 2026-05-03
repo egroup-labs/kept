@@ -1,0 +1,54 @@
+{
+  "name": "kept-vault-server",
+  "version": "1.0.0",
+  "description": "MCP server for reading, writing, searching, and managing Kept conversation vault",
+  "author": "E-Group Labs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/egroup-labs/kept.work.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://github.com/egroup-labs/kept.work/tree/main/mcp",
+  "bugs": {
+    "url": "https://github.com/egroup-labs/kept.work/issues"
+  },
+  "keywords": ["mcp", "kept", "vault", "conversations", "markdown", "claude", "chatgpt"],
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "kept-vault-server": "./bin/kept-vault-server.js"
+  },
+  "sideEffects": false,
+  "files": ["dist/", "bin/", "skills/", ".claude-plugin/", ".mcp.json", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "prepack": "npm run build",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "check": "tsc --noEmit && biome check ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "fast-glob": "^3.3.3",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

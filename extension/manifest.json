@@ -1,0 +1,72 @@
+{
+  "manifest_version": 3,
+  "name": "Kept",
+  "version": "0.2.0",
+  "description": "Sync and archive your AI conversations as local markdown files with Kept.",
+  "permissions": [
+    "storage",
+    "alarms",
+    "idle"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://files.oaiusercontent.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://lh3.googleusercontent.com/*",
+    "https://grok.com/*",
+    "https://assets.grok.com/*",
+    "https://www.kimi.com/*",
+    "https://kimi-img.moonshot.cn/*",
+    "http://localhost:18241/*",
+    "http://127.0.0.1:18241/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:18241/connect*",
+        "http://127.0.0.1:18241/connect*"
+      ],
+      "js": [
+        "connect.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "https://kimi.com/*",
+        "https://www.kimi.com/*"
+      ],
+      "js": [
+        "kimi-auth.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "command-palette.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

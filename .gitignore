@@ -1,0 +1,66 @@
+
+# workflows not included in repo
+.github/workflows
+
+# -------------
+
+/.claude
+/.kept/
+/.playwright-mcp
+/.superpowers/
+/scout/
+*.zip
+*.tgz
+*.tar.gz
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Agent/planning scratch output
+**/docs/superpowers/
+**/docs/plans/
+extracted_keywords.txt
+
+# Build outputs and caches
+node_modules/
+dist/
+dist-ssr/
+target/
+coverage/
+.vite/
+.turbo/
+*.tsbuildinfo
+*.rlib
+__pycache__/
+.pytest_cache/
+
+*.png
+!kept-logo.png
+!app/src-tauri/icons/*.png
+!app/src-tauri/icons/android/**/*.png
+!app/src-tauri/icons/ios/*.png
+!extension/icons/*.png
+!proxy/static/*.png
+
+infra_scripts/
+installers/
+proxy/latest-release/
+
+*.csv
+*.xlsx
+
+.mcp.json
+!mcp/.mcp.json
+
+*.dmg
+*.deb
+*.exe
+*.AppImage
+*.sig
+*.cer
+*.csr
+*.p12
+*.key
+*.pem
