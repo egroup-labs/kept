@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'self' http://localhost:18241 http://127.0.0.1:18241;">
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+  <div class="shell">
+    <div class="header">
+      <div class="brand">
+        <h1>Kept</h1>
+        <div class="header-subtitle" id="appStatusTag" title="Desktop app connection">checking…</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="settings-list">
+        <div class="path-row">
+          <label class="toggle-label" for="syncTargetInput">Sync to</label>
+          <input
+            type="text"
+            id="syncTargetInput"
+            class="path-input"
+            placeholder="Default vault (~/.kept/vault)"
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <div class="path-hint" id="syncTargetHint">Absolute path. Empty uses the default Kept vault.</div>
+        </div>
+
+        <div class="slider-row">
+          <div class="slider-header">
+            <span class="toggle-label">Sync limit per provider</span>
+            <span class="slider-value" id="syncLimitValue">All</span>
+          </div>
+          <input type="range" id="syncLimitSlider" class="range-slider" min="0" max="200" step="5" value="0">
+          <div class="slider-hints">
+            <span>All</span>
+            <span>200</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="platformSection">
+      <div class="section-head">
+        <div class="section-title">Providers</div>
+      </div>
+
+      <div class="platform-row" id="chatgptRow">
+        <div class="platform-main">
+          <div class="platform-name">ChatGPT</div>
+          <div class="platform-detail" id="chatgptDetail">Not synced yet</div>
+        </div>
+        <div class="platform-actions">
+          <span class="platform-tag" id="chatgptTag">-</span>
+          <label class="toggle">
+            <input type="checkbox" id="providerChatgpt">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="platform-row" id="claudeRow">
+        <div class="platform-main">
+          <div class="platform-name">Claude</div>
+          <div class="platform-detail" id="claudeDetail">Not synced yet</div>
+        </div>
+        <div class="platform-actions">
+          <span class="platform-tag" id="claudeTag">-</span>
+          <label class="toggle">
+            <input type="checkbox" id="providerClaude">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="platform-row" id="geminiRow">
+        <div class="platform-main">
+          <div class="platform-name">Gemini</div>
+          <div class="platform-detail" id="geminiDetail">Not synced yet</div>
+        </div>
+        <div class="platform-actions">
+          <span class="platform-tag" id="geminiTag">-</span>
+          <label class="toggle">
+            <input type="checkbox" id="providerGemini">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="platform-row" id="grokRow">
+        <div class="platform-main">
+          <div class="platform-name">Grok</div>
+          <div class="platform-detail" id="grokDetail">Not synced yet</div>
+        </div>
+        <div class="platform-actions">
+          <span class="platform-tag" id="grokTag">-</span>
+          <label class="toggle">
+            <input type="checkbox" id="providerGrok">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="platform-row" id="kimiRow">
+        <div class="platform-main">
+          <div class="platform-name">Kimi</div>
+          <div class="platform-detail" id="kimiDetail">Not synced yet</div>
+        </div>
+        <div class="platform-actions">
+          <span class="platform-tag" id="kimiTag">-</span>
+          <label class="toggle">
+            <input type="checkbox" id="providerKimi">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <button class="sync-btn" id="syncBtn">Sync Now</button>
+    </div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+
+</html>

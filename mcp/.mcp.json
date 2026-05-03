@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "kept-vault": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+      "env": {
+        "KEPT_VAULT_PATH": "~/.kept/vault"
+      }
+    }
+  }
+}
