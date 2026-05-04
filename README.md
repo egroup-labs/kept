@@ -1,7 +1,7 @@
 # Kept
 
 <p align="center">
-  <img src="demo.gif" alt="Kept archival illustration" width="100%">
+  <img src="demo.gif" alt="Kept archival illustration" width="100%" style="border-radius:20px;">
 </p>
 
 Kept saves your AI conversations as local Markdown files, then gives you a desktop app to search, browse, connect, and reuse them.
