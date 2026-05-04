@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="kept-logo.png" alt="Kept logo" width="112">
+  <img src="demo.gif" alt="Kept archival illustration" width="80%">
 </p>
 
 # Kept
