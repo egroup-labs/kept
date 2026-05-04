@@ -194,7 +194,7 @@ Requirements:
 - Optional: [Ollama](https://ollama.com/) for local models and embeddings
 
 ```bash
-git clone https://github.com/egroup-labs/kept.work.git
+git clone https://github.com/egroup-labs/kept.git
 cd kept/app
 npm ci
 npm run tauri dev
