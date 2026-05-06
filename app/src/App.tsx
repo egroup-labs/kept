@@ -643,6 +643,9 @@ export default function App() {
     setActivePageRaw(page);
   }, []);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
+  const [spacerHeight, setSpacerHeight] = useState<number>(0);
+  const initialSpacerRef = useRef<number>(0);
+  const spacerSnapshotRef = useRef<number>(0);
   const { pending: pendingConsent, remaining: pendingConsentRemaining, respond: respondConsent } = useCodeConsentQueue();
   const [chatTitle, setChatTitle] = useState("New Chat");
   const chatConvId = useRef<string>(crypto.randomUUID());
@@ -1575,6 +1578,23 @@ export default function App() {
     setMessages(newMessages);
     setChatActive(true);
     setLoading(true);
+    requestAnimationFrame(() => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+      const lastUserEl = container.querySelector(
+        `[data-chat-msg-index="${newMessages.length - 1}"]`,
+      ) as HTMLElement | null;
+      const userMsgH = lastUserEl?.offsetHeight ?? 0;
+      const initial = Math.max(0, container.clientHeight - userMsgH - 80);
+      initialSpacerRef.current = initial;
+      setSpacerHeight(initial);
+
+      if (lastUserEl) {
+        const top = lastUserEl.offsetTop - 80;
+        container.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+      }
+    });
+    try { localStorage.removeItem(`kept_spacer_${convId}`); } catch { /* ignore */ }
 
     // Tracks the freshest message list across async callbacks (title-gen,
     // agent, error). Every save path reads from here so a late-resolving
@@ -1713,6 +1733,9 @@ export default function App() {
       if (chatConvId.current === convId) {
         setLoading(false);
         activeStreamConvIdRef.current = null;
+        try {
+          localStorage.setItem(`kept_spacer_${convId}`, String(spacerSnapshotRef.current ?? 0));
+        } catch { /* ignore */ }
       }
     }
   };
@@ -1767,35 +1790,6 @@ export default function App() {
     updateChatActiveMsg();
   }, [updateChatActiveMsg]);
 
-  const scrollRaf = useRef(0);
-  useEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el) return;
-    setFadeBottom(false);
-    const start = el.scrollTop;
-    const target = el.scrollHeight - el.clientHeight;
-    const dist = target - start;
-    if (Math.abs(dist) < 2) return;
-    const duration = Math.min(600, 250 + Math.abs(dist) * 0.4);
-    const t0 = performance.now();
-    if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current);
-    const step = (now: number) => {
-      const elapsed = now - t0;
-      const p = Math.min(elapsed / duration, 1);
-      // ease-out cubic
-      const ease = 1 - (1 - p) ** 3;
-      el.scrollTop = start + dist * ease;
-      if (p < 1) {
-        scrollRaf.current = requestAnimationFrame(step);
-      } else {
-        scrollRaf.current = 0;
-        checkScroll();
-      }
-    };
-    scrollRaf.current = requestAnimationFrame(step);
-    return () => { if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current); };
-  }, [messages, loading, checkScroll]);
-
   useEffect(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
@@ -1806,6 +1800,29 @@ export default function App() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [checkScroll]);
+
+  useEffect(() => { spacerSnapshotRef.current = spacerHeight; }, [spacerHeight]);
+
+  useEffect(() => {
+    if (!loading) return;
+    const lastIdx = messages.length - 1;
+    if (lastIdx < 0 || messages[lastIdx]?.role !== "assistant") return;
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const target = container.querySelector(
+      `[data-chat-msg-index="${lastIdx}"]`,
+    ) as HTMLElement | null;
+    if (!target) return;
+    const obs = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const h = entry.contentRect.height;
+      const next = Math.max(0, initialSpacerRef.current - h);
+      setSpacerHeight((prev) => (prev === next ? prev : next));
+    });
+    obs.observe(target);
+    return () => obs.disconnect();
+  }, [loading, messages]);
 
   // Recompute the rail's gap proportions when message content changes
   // (covers new messages and streaming token updates).
@@ -1819,6 +1836,7 @@ export default function App() {
     assistantReasoningRef.current = "";
     activeStreamConvIdRef.current = null;
     setMessages([]);
+    setSpacerHeight(0);
     setChatTitle("New Chat");
     chatTitleRef.current = "New Chat";
     chatConvId.current = crypto.randomUUID();
@@ -1841,6 +1859,8 @@ export default function App() {
       reasoning: m.reasoning,
       toolCalls: m.toolCalls,
     })));
+    const stored = Number.parseInt(localStorage.getItem(`kept_spacer_${conversationId || ''}`) ?? '0', 10);
+    setSpacerHeight(Number.isFinite(stored) ? stored : 0);
     setChatTitle(title);
     chatTitleRef.current = title;
     chatConvId.current = conversationId || crypto.randomUUID();
@@ -2186,6 +2206,12 @@ export default function App() {
                       <span style={{ animation: "pulse 1.4s ease-in-out 0.4s infinite" }}>.</span>
                     </span>
                   </div>
+                )}
+                {spacerHeight > 0 && (
+                  <div
+                    aria-hidden
+                    style={{ height: spacerHeight, flexShrink: 0 }}
+                  />
                 )}
                 <div ref={messagesEndRef} />
               </div>
