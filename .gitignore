@@ -18,6 +18,9 @@
 .env.*
 !.env.example
 
+# Local Claude/agent project memory (kept out of repo per upstream)
+CLAUDE.md
+
 # Agent/planning scratch output
 **/docs/superpowers/
 **/docs/plans/

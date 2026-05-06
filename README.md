@@ -1,8 +1,8 @@
-<p align="center">
-  <img src="kept-logo.png" alt="Kept logo" width="112">
-</p>
-
 # Kept
+
+<p align="center">
+  <img src="demo.gif" alt="Kept archival illustration" width="100%" style="border-radius:20px;">
+</p>
 
 Kept saves your AI conversations as local Markdown files, then gives you a desktop app to search, browse, connect, and reuse them.
 
@@ -194,7 +194,7 @@ Requirements:
 - Optional: [Ollama](https://ollama.com/) for local models and embeddings
 
 ```bash
-git clone https://github.com/egroup-labs/kept.work.git
+git clone https://github.com/egroup-labs/kept.git
 cd kept/app
 npm ci
 npm run tauri dev

@@ -27,7 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$RepoUrl    = 'https://github.com/egroup-labs/kept.work.git'
+$RepoUrl    = 'https://github.com/egroup-labs/kept.git'
 $DefaultDir = Join-Path $HOME '.kept\mcp-src'
 $VaultPath  = if ($env:KEPT_VAULT_PATH) { $env:KEPT_VAULT_PATH } else { Join-Path $HOME '.kept\vault' }
 if (-not $Ref) { $Ref = if ($env:KEPT_REF) { $env:KEPT_REF } else { 'main' } }
@@ -112,7 +112,7 @@ if (-not (Test-Path (Join-Path $mcpDir 'package.json'))) {
   if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
   $cloneUrl = $RepoUrl
   if ($env:GITHUB_TOKEN) {
-    $cloneUrl = "https://x-access-token:$($env:GITHUB_TOKEN)@github.com/egroup-labs/kept.work.git"
+    $cloneUrl = "https://x-access-token:$($env:GITHUB_TOKEN)@github.com/egroup-labs/kept.git"
     Log "Cloning egroup-labs/kept.work@$Ref into $Dir (authenticated)"
   } else {
     Log "Cloning $RepoUrl@$Ref into $Dir"

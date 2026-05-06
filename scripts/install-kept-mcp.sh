@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/egroup-labs/kept.work.git"
+REPO_URL="https://github.com/egroup-labs/kept.git"
 DEFAULT_DIR="$HOME/.kept/mcp-src"
 VAULT_PATH="${KEPT_VAULT_PATH:-$HOME/.kept/vault}"
 REF="${KEPT_REF:-main}"
@@ -99,7 +99,7 @@ if [[ ! -f "$MCP_DIR/package.json" ]]; then
   mkdir -p "$(dirname "$DIR")"
   CLONE_URL="$REPO_URL"
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/egroup-labs/kept.work.git"
+    CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/egroup-labs/kept.git"
     log "Cloning egroup-labs/kept.work@$REF into $DIR (authenticated)"
   else
     log "Cloning $REPO_URL@$REF into $DIR"
