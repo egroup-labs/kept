@@ -435,7 +435,7 @@ struct OpenAiStreamState {
     content: String,
     finish_reason: Option<String>,
     reasoning: String,
-    reasoning_details: Vec<serde_json::Value>,
+    reasoning_details: BTreeMap<usize, serde_json::Value>,
     tool_calls: BTreeMap<usize, (String, String, String)>,
 }
 
@@ -455,7 +455,17 @@ impl OpenAiStreamState {
             message["reasoning"] = serde_json::Value::String(self.reasoning);
         }
         if !self.reasoning_details.is_empty() {
-            message["reasoning_details"] = serde_json::Value::Array(self.reasoning_details);
+            let details: Vec<serde_json::Value> = self
+                .reasoning_details
+                .into_values()
+                .map(|mut v| {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.remove("index");
+                    }
+                    v
+                })
+                .collect();
+            message["reasoning_details"] = serde_json::Value::Array(details);
         }
 
         if !self.tool_calls.is_empty() {
@@ -509,6 +519,38 @@ fn reasoning_detail_text(detail: &serde_json::Value) -> Option<String> {
         None
     } else {
         Some(text.to_string())
+    }
+}
+
+/// Merge a streaming `reasoning_details` delta entry into an accumulated entry.
+///
+/// String fields that the provider streams in chunks (`text`, `summary`, `data`)
+/// are concatenated. All other fields (`type`, `id`, `format`, `signature`, …)
+/// are copied/overwritten — `signature` in particular arrives once at the end
+/// and must replace any prior placeholder. Without this, blocks reassembled
+/// from extending the array verbatim end up with mismatched signatures, which
+/// Anthropic rejects on the next turn ("Invalid signature in thinking block").
+fn merge_reasoning_detail(target: &mut serde_json::Value, src: &serde_json::Value) {
+    let (Some(t), Some(s)) = (target.as_object_mut(), src.as_object()) else {
+        return;
+    };
+    for (k, v) in s {
+        match k.as_str() {
+            "text" | "summary" | "data" => {
+                if let Some(new_str) = v.as_str() {
+                    let existing = t.get(k).and_then(|x| x.as_str()).unwrap_or("");
+                    t.insert(
+                        k.clone(),
+                        serde_json::Value::String(format!("{existing}{new_str}")),
+                    );
+                } else {
+                    t.insert(k.clone(), v.clone());
+                }
+            }
+            _ => {
+                t.insert(k.clone(), v.clone());
+            }
+        }
     }
 }
 
@@ -575,7 +617,17 @@ fn apply_openai_stream_payload(
         );
     }
     if let Some(details) = delta["reasoning_details"].as_array() {
-        state.reasoning_details.extend(details.iter().cloned());
+        for d in details {
+            let index = d["index"]
+                .as_u64()
+                .map(|x| x as usize)
+                .unwrap_or_else(|| state.reasoning_details.len());
+            let entry = state
+                .reasoning_details
+                .entry(index)
+                .or_insert_with(|| serde_json::json!({}));
+            merge_reasoning_detail(entry, d);
+        }
     }
 
     if let Some(calls) = delta["tool_calls"].as_array() {
