@@ -9,6 +9,39 @@ use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tauri::{Emitter, State, Window};
+use tokio_util::sync::CancellationToken;
+
+/// Partial state captured while the agent loop runs, so a cancel can save
+/// whatever was already produced.
+#[derive(Default)]
+struct PartialAccumulator {
+    content: String,
+    reasoning: String,
+    tool_calls: Vec<crate::models::ToolCallRecord>,
+}
+
+async fn emit_cancelled(
+    window: &Window,
+    conversation_id: Option<&str>,
+    iteration: u32,
+    acc: &mut PartialAccumulator,
+) -> AgentChatResponse {
+    let _ = window.emit(
+        "agent-cancelled",
+        serde_json::json!({
+            "conversation_id": conversation_id,
+            "content": acc.content,
+            "reasoning": acc.reasoning,
+            "tool_calls": acc.tool_calls,
+            "iteration": iteration,
+        }),
+    );
+    AgentChatResponse {
+        content: std::mem::take(&mut acc.content),
+        tool_executions: Vec::new(),
+        iterations: iteration,
+    }
+}
 
 /// Returns true when the app is in restricted privacy mode.
 fn is_restricted(cfg: &crate::models::AppConfig) -> bool {
@@ -588,6 +621,7 @@ async fn read_openai_streaming_response(
     channel: &str,
     conversation_id: Option<&str>,
     iteration: u32,
+    cancel_token: &CancellationToken,
 ) -> Result<serde_json::Value, String> {
     let content_type = response_header_value(&resp, CONTENT_TYPE);
     if !content_type.contains("text/event-stream") {
@@ -598,18 +632,29 @@ async fn read_openai_streaming_response(
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Failed to read {label} stream: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        for payload in drain_sse_payloads(&mut buffer) {
-            apply_openai_stream_payload(
-                &payload,
-                &mut state,
-                window,
-                channel,
-                conversation_id,
-                iteration,
-            )?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            next = stream.next() => {
+                match next {
+                    Some(chunk) => {
+                        let chunk = chunk.map_err(|e| format!("Failed to read {label} stream: {e}"))?;
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        for payload in drain_sse_payloads(&mut buffer) {
+                            apply_openai_stream_payload(
+                                &payload,
+                                &mut state,
+                                window,
+                                channel,
+                                conversation_id,
+                                iteration,
+                            )?;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 
@@ -833,23 +878,35 @@ async fn read_anthropic_streaming_response(
     channel: &str,
     conversation_id: Option<&str>,
     iteration: u32,
+    cancel_token: &CancellationToken,
 ) -> Result<serde_json::Value, String> {
     let mut state = AnthropicStreamState::default();
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Failed to read Anthropic stream: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        for payload in drain_sse_payloads(&mut buffer) {
-            apply_anthropic_stream_payload(
-                &payload,
-                &mut state,
-                window,
-                channel,
-                conversation_id,
-                iteration,
-            )?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            next = stream.next() => {
+                match next {
+                    Some(chunk) => {
+                        let chunk = chunk.map_err(|e| format!("Failed to read Anthropic stream: {e}"))?;
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        for payload in drain_sse_payloads(&mut buffer) {
+                            apply_anthropic_stream_payload(
+                                &payload,
+                                &mut state,
+                                window,
+                                channel,
+                                conversation_id,
+                                iteration,
+                            )?;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 
@@ -933,11 +990,38 @@ pub async fn cmd_agent_chat(
     kg: State<'_, crate::commands::KgState>,
     cache: State<'_, crate::commands::GraphCacheState>,
     consent: State<'_, crate::commands::CodeConsentState>,
+    cancel_state: State<'_, crate::commands::AgentCancelState>,
     request: AgentChatRequest,
 ) -> Result<AgentChatResponse, String> {
     let cfg = config::read_config()?;
     let restricted = is_restricted(&cfg);
     let conv_id = request.conversation_id.clone();
+    let cancel_key = conv_id
+        .clone()
+        .unwrap_or_else(|| format!("anon-{}", uuid::Uuid::new_v4()));
+
+    let cancel_token = CancellationToken::new();
+    if let Ok(mut map) = cancel_state.0.lock() {
+        map.insert(cancel_key.clone(), cancel_token.clone());
+    }
+
+    struct CancelGuard<'a> {
+        state: &'a crate::commands::AgentCancelState,
+        key: String,
+    }
+    impl Drop for CancelGuard<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut map) = self.state.0.lock() {
+                map.remove(&self.key);
+            }
+        }
+    }
+    let _cancel_guard = CancelGuard {
+        state: &cancel_state,
+        key: cancel_key.clone(),
+    };
+
+    let mut accumulated = PartialAccumulator::default();
 
     // System prompt: unified prompt with runtime context and tools.md appended.
     let tools_md = config::tools_md_path()
@@ -1024,6 +1108,9 @@ pub async fn cmd_agent_chat(
 
             loop {
                 iteration += 1;
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
                 if iteration > MAX_ITERATIONS {
                     return Err("Agent reached maximum iteration limit".to_string());
                 }
@@ -1105,6 +1192,7 @@ pub async fn cmd_agent_chat(
                         event_channel,
                         conv_id.as_deref(),
                         iteration,
+                        &cancel_token,
                     )
                     .await?
                 };
@@ -1128,6 +1216,22 @@ pub async fn cmd_agent_chat(
 
                 messages.push(message_val.clone());
 
+                // Capture partial content/reasoning into the accumulator so a
+                // cancel after this point still saves them. Replace each
+                // iteration; the latest assistant turn is the canonical state.
+                accumulated.content = message_val["content"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                accumulated.reasoning = message_val["reasoning"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
+
                 if use_tools && finish_reason == "tool_calls" {
                     if let Some(tool_calls) = message_val["tool_calls"].as_array() {
                         // Parse all tool calls upfront
@@ -1149,6 +1253,10 @@ pub async fn cmd_agent_chat(
                             .collect();
 
                         for (_, func_name, args) in &parsed {
+                            accumulated.tool_calls.push(crate::models::ToolCallRecord {
+                                name: func_name.clone(),
+                                arguments: args.clone(),
+                            });
                             let _ = window.emit(
                                 event_channel,
                                 AgentProgress {
@@ -1184,11 +1292,15 @@ pub async fn cmd_agent_chat(
                         };
 
                         // Execute all tools in parallel
-                        let results =
-                            join_all(parsed.iter().map(|(_, func_name, args)| {
+                        let results = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                            }
+                            res = join_all(parsed.iter().map(|(_, func_name, args)| {
                                 registry.execute(func_name, args, &ctx)
-                            }))
-                            .await;
+                            })) => res,
+                        };
 
                         let mut needs_cache_clear = false;
                         for ((tc_id, func_name, args), result) in parsed.into_iter().zip(results) {
@@ -1292,6 +1404,9 @@ pub async fn cmd_agent_chat(
 
             loop {
                 iteration += 1;
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
                 if iteration > MAX_ITERATIONS {
                     return Err("Agent reached maximum iteration limit".to_string());
                 }
@@ -1358,6 +1473,7 @@ pub async fn cmd_agent_chat(
                     event_channel,
                     conv_id.as_deref(),
                     iteration,
+                    &cancel_token,
                 )
                 .await?;
 
@@ -1393,8 +1509,38 @@ pub async fn cmd_agent_chat(
                     "content": json["content"],
                 }));
 
+                // Capture text content into accumulator. Anthropic doesn't have a
+                // separate streamed reasoning text field on the response root —
+                // thinking blocks live inside content; combine plain text parts.
+                accumulated.content = text_parts.join("");
+                // Reasoning: pull from any thinking blocks within content.
+                if let Some(blocks) = json["content"].as_array() {
+                    let thinking: String = blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if b["type"].as_str() == Some("thinking") {
+                                b["thinking"].as_str().map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !thinking.is_empty() {
+                        accumulated.reasoning = thinking;
+                    }
+                }
+
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
+
                 if stop_reason == "tool_use" && !tool_uses.is_empty() {
                     for (_, func_name, args) in &tool_uses {
+                        accumulated.tool_calls.push(crate::models::ToolCallRecord {
+                            name: func_name.clone(),
+                            arguments: args.clone(),
+                        });
                         let _ = window.emit(
                             event_channel,
                             AgentProgress {
@@ -1426,12 +1572,17 @@ pub async fn cmd_agent_chat(
                         conversation_id: conv_id.as_deref(),
                     };
 
-                    let results = join_all(
-                        tool_uses
-                            .iter()
-                            .map(|(_, func_name, args)| registry.execute(func_name, args, &ctx)),
-                    )
-                    .await;
+                    let results = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                        }
+                        res = join_all(
+                            tool_uses
+                                .iter()
+                                .map(|(_, func_name, args)| registry.execute(func_name, args, &ctx)),
+                        ) => res,
+                    };
 
                     let mut tool_results: Vec<serde_json::Value> = Vec::new();
                     let mut needs_cache_clear = false;
@@ -2613,4 +2764,25 @@ pub fn cmd_agent_cancel(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    #[test]
+    fn partial_accumulator_round_trips_into_response_via_take() {
+        let mut acc = PartialAccumulator {
+            content: "Partial answer".into(),
+            reasoning: "Thinking step".into(),
+            tool_calls: vec![crate::models::ToolCallRecord {
+                name: "search_nodes".into(),
+                arguments: serde_json::json!({"q": "x"}),
+            }],
+        };
+        let content = std::mem::take(&mut acc.content);
+        assert_eq!(content, "Partial answer");
+        assert_eq!(acc.reasoning, "Thinking step");
+        assert_eq!(acc.tool_calls.len(), 1);
+    }
 }
