@@ -1,4 +1,4 @@
-import { memo, useState, useRef, useLayoutEffect } from "react";
+import { memo, useState, useRef, useLayoutEffect, useEffect } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import type { ChatAttachment } from "../lib/types";
@@ -14,8 +14,16 @@ interface ChatMessageProps {
   onClampDetected?: (needsClamp: boolean) => void;
   attachments?: ChatAttachment[];
   reasoning?: string;
+  toolCalls?: { name: string; arguments: unknown }[];
   streaming?: boolean;
   thinkingActive?: boolean;
+}
+
+function formatArgs(args: unknown): string {
+  if (args == null || typeof args !== "object") return "";
+  return Object.entries(args as Record<string, unknown>)
+    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    .join(", ");
 }
 
 export function RoleLabel({ role, assistantLabel }: { role: string; assistantLabel?: string }) {
@@ -131,7 +139,6 @@ function UserMessage({ content, expanded = false, onToggleExpand, onClampDetecte
 }
 
 function ThinkingBlock({ content, active = false }: { content?: string; active?: boolean }) {
-  const [open, setOpen] = useState(true);
   const trimmed = content?.trim();
   if (!trimmed) return null;
 
@@ -145,18 +152,119 @@ function ThinkingBlock({ content, active = false }: { content?: string; active?:
         paddingLeft: 10,
       }}
     >
+      <div
+        style={{
+          color: "rgba(195,236,255,0.48)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 700,
+          lineHeight: 1,
+          paddingBottom: 5,
+        }}
+      >
+        Thinking
+      </div>
+      <MarkdownRenderer
+        content={trimmed}
+        className="chat-markdown chat-thinking-markdown"
+        streaming={active}
+      />
+    </div>
+  );
+}
+
+function ToolsBlock({ toolCalls }: { toolCalls?: { name: string; arguments: unknown }[] }) {
+  if (!toolCalls || toolCalls.length === 0) return null;
+  return (
+    <div
+      style={{
+        width: "100%",
+        minWidth: 0,
+        marginBottom: 10,
+        borderLeft: "1px solid rgba(195,236,255,0.16)",
+        paddingLeft: 10,
+      }}
+    >
+      <div
+        style={{
+          color: "rgba(195,236,255,0.48)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 700,
+          lineHeight: 1,
+          paddingBottom: 5,
+        }}
+      >
+        Tool calls
+      </div>
+      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        {toolCalls.map((t, i) => {
+          const argsStr = formatArgs(t.arguments);
+          const display = `${t.name}(${argsStr.length > 80 ? argsStr.slice(0, 80) + "…" : argsStr})`;
+          return (
+            <li
+              key={i}
+              title={`${t.name}(${argsStr})`}
+              style={{
+                fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+                fontSize: 12,
+                color: "rgba(195,236,255,0.55)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {display}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function DetailsBlock({
+  reasoning,
+  toolCalls,
+  thinkingActive,
+  streaming,
+}: {
+  reasoning?: string;
+  toolCalls?: { name: string; arguments: unknown }[];
+  thinkingActive?: boolean;
+  streaming?: boolean;
+}) {
+  const hasReasoning = !!reasoning?.trim();
+  const hasTools = !!toolCalls && toolCalls.length > 0;
+
+  const label = hasReasoning && hasTools ? "Details" : hasTools ? "Tool calls" : "Thinking";
+
+  const [open, setOpen] = useState<boolean>(true);
+  const wasStreaming = useRef<boolean>(false);
+  useEffect(() => {
+    if (wasStreaming.current && !streaming) {
+      setOpen(false);
+    }
+    wasStreaming.current = !!streaming;
+  }, [streaming]);
+  useEffect(() => { if (streaming) setOpen(true); }, [streaming]);
+
+  if (!hasReasoning && !hasTools) return null;
+
+  return (
+    <div style={{ width: "100%", minWidth: 0, marginBottom: 10 }}>
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen((v) => !v)}
         style={{
           display: "inline-flex",
           alignItems: "center",
           gap: 5,
           background: "transparent",
           border: "none",
-          padding: "0 0 5px",
+          padding: "0 0 8px",
           cursor: "pointer",
-          color: "rgba(195,236,255,0.48)",
+          color: "rgba(195,236,255,0.6)",
           fontFamily: "var(--font-sans)",
           fontSize: 12,
           fontWeight: 700,
@@ -164,14 +272,13 @@ function ThinkingBlock({ content, active = false }: { content?: string; active?:
         }}
       >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        Thinking
+        {label}
       </button>
       {open && (
-        <MarkdownRenderer
-          content={trimmed}
-          className="chat-markdown chat-thinking-markdown"
-          streaming={active}
-        />
+        <div>
+          <ThinkingBlock content={reasoning} active={thinkingActive} />
+          <ToolsBlock toolCalls={toolCalls} />
+        </div>
       )}
     </div>
   );
@@ -186,6 +293,7 @@ export default memo(function ChatMessage({
   onClampDetected,
   attachments,
   reasoning,
+  toolCalls,
   streaming = false,
   thinkingActive = false,
 }: ChatMessageProps) {
@@ -197,7 +305,12 @@ export default memo(function ChatMessage({
           ? <UserMessage content={content} expanded={expanded} onToggleExpand={onToggleExpand} onClampDetected={onClampDetected} attachments={attachments} />
           : (
             <>
-              <ThinkingBlock content={reasoning} active={thinkingActive} />
+              <DetailsBlock
+                reasoning={reasoning}
+                toolCalls={toolCalls}
+                thinkingActive={thinkingActive}
+                streaming={streaming}
+              />
               {content ? <MarkdownRenderer content={content} streaming={streaming} /> : null}
             </>
           )}
