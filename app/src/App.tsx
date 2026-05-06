@@ -20,7 +20,7 @@ import { CompactNav, useCompact } from "./components/SideNav";
 import Titlebar from "./components/Titlebar";
 import UpdateBanner from "./components/UpdateBanner";
 import { responsiveRadius, squirclePath } from "./lib/squircle";
-import { agentChat, cmdKgClassifyNewConversations, cmdKgGetGraph, cmdKgGetProjects, cmdKgGetTopicConversations, cmdKgLinkConversation, cmdSuggestProjectConversations, deleteConversation, generateTitle, getConfig, getConversation, getExtensionStatus, getExtensionZip, getVaultPath, isTauri, listConversations, listModels, refreshToken, renameConversation, requestExtensionSync, saveKeptChat, setConfig, stopExtensionSync } from "./lib/tauri-api";
+import { agentCancel, agentChat, cmdKgClassifyNewConversations, cmdKgGetGraph, cmdKgGetProjects, cmdKgGetTopicConversations, cmdKgLinkConversation, cmdSuggestProjectConversations, deleteConversation, generateTitle, getConfig, getConversation, getExtensionStatus, getExtensionZip, getVaultPath, isTauri, listConversations, listModels, refreshToken, renameConversation, requestExtensionSync, saveKeptChat, setConfig, stopExtensionSync } from "./lib/tauri-api";
 import { parseFrontmatter, parseMessages } from "./lib/markdown";
 import type {
   AppConfig,
@@ -1475,6 +1475,7 @@ export default function App() {
       unlisten?.();
     };
   }, [appendReasoningDelta, appendStreamingDelta, clearStreamingBuffer, clearVisibleAssistantContent, setChatStatusIfChanged]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<ChatContainerHandle>(null);
@@ -1564,6 +1565,52 @@ export default function App() {
     };
     saveKeptChat(payload).catch((err) => console.warn("Failed to persist chat:", err));
   }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const stop = await listen<{
+        conversation_id?: string;
+        content?: string;
+        reasoning?: string;
+        tool_calls?: { name: string; arguments: unknown }[];
+      }>("agent-cancelled", (event) => {
+        const { conversation_id, content, reasoning, tool_calls } = event.payload;
+        if (conversation_id && activeStreamConvIdRef.current && conversation_id !== activeStreamConvIdRef.current) {
+          return;
+        }
+        flushReasoningStreamingBuffer();
+        flushStreamingBuffer();
+        const finalAssistant: ChatUiMessage = {
+          role: "assistant",
+          content: content ?? "",
+          reasoning: reasoning?.trim() || undefined,
+          toolCalls: tool_calls && tool_calls.length > 0 ? tool_calls : undefined,
+        };
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && (last.content === "" || last.content === finalAssistant.content)) {
+            const next = [...prev.slice(0, -1), finalAssistant];
+            persistChat(next);
+            return next;
+          }
+          const next = [...prev, finalAssistant];
+          persistChat(next);
+          return next;
+        });
+        setLoading(false);
+        activeStreamConvIdRef.current = null;
+        pendingToolsRef.current = [];
+        setPendingToolsVersion((v) => v + 1);
+      });
+      if (disposed) stop();
+      else unlisten = stop;
+    })();
+    return () => { disposed = true; unlisten?.(); };
+  }, [flushReasoningStreamingBuffer, flushStreamingBuffer, persistChat]);
 
   const handleSendMessage = async (text: string, model: string, attachments?: ChatAttachment[]) => {
     const isFirstMessage = messages.length === 0;
@@ -1830,6 +1877,11 @@ export default function App() {
     setChatHeightsVersion((v) => v + 1);
     updateChatActiveMsg();
   }, [messages, updateChatActiveMsg]);
+
+  const handleStop = useCallback(() => {
+    const convId = activeStreamConvIdRef.current ?? chatConvId.current;
+    agentCancel(convId).catch((err) => console.warn("Failed to cancel agent:", err));
+  }, []);
 
   const handleNewChat = useCallback(() => {
     clearStreamingBuffer();
@@ -2242,6 +2294,7 @@ export default function App() {
               <ChatContainer
                 ref={chatRef}
                 onSendMessage={handleSendMessage}
+                onStop={handleStop}
                 loading={loading}
                 models={chatModelOptions}
                 preferredModelIds={preferredChatModelIds}
