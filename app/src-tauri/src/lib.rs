@@ -118,6 +118,7 @@ pub fn run() {
         .manage(GraphCacheState(Mutex::new(HashMap::new())))
         .manage(TokenState(token_state))
         .manage(CodeConsentState(Arc::new(Mutex::new(HashMap::new()))))
+        .manage(commands::AgentCancelState(Mutex::new(HashMap::new())))
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let server_token = Arc::clone(&server_token);
@@ -311,6 +312,7 @@ pub fn run() {
             commands::cmd_mark_digest_items_seen,
             commands::cmd_trigger_digest_auto_pass,
             chat::cmd_agent_chat,
+            chat::cmd_agent_cancel,
             chat::cmd_generate_title,
             chat::cmd_save_kept_chat,
             commands::cmd_claude_scan_projects,

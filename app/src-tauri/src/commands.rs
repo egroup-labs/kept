@@ -31,6 +31,7 @@ pub struct KgState(pub Mutex<Option<Arc<KgDatabase>>>);
 pub struct GraphCacheState(pub Mutex<HashMap<usize, GraphData>>);
 pub struct TokenState(pub Arc<Mutex<String>>);
 pub struct CodeConsentState(pub Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>);
+pub struct AgentCancelState(pub Mutex<HashMap<String, tokio_util::sync::CancellationToken>>);
 
 fn with_db<F, T>(state: &State<DbState>, f: F) -> Result<T, String>
 where

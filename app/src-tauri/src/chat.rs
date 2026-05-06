@@ -2599,3 +2599,18 @@ pub fn cmd_save_kept_chat(
 
     Ok(file_path)
 }
+
+/// Cancel an in-flight `cmd_agent_chat` for the given conversation.
+/// Idempotent — cancelling an unknown id is a no-op.
+#[tauri::command]
+pub fn cmd_agent_cancel(
+    state: tauri::State<'_, crate::commands::AgentCancelState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    if let Ok(map) = state.0.lock() {
+        if let Some(token) = map.get(&conversation_id) {
+            token.cancel();
+        }
+    }
+    Ok(())
+}
