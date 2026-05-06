@@ -1148,13 +1148,13 @@ pub async fn cmd_agent_chat(
                             })
                             .collect();
 
-                        for (_, func_name, _) in &parsed {
+                        for (_, func_name, args) in &parsed {
                             let _ = window.emit(
                                 event_channel,
                                 AgentProgress {
                                     stage: "tool_call".to_string(),
                                     tool_name: Some(func_name.clone()),
-                                    tool_arguments: None,
+                                    tool_arguments: Some(args.clone()),
                                     iteration,
                                 },
                             );
@@ -1394,13 +1394,13 @@ pub async fn cmd_agent_chat(
                 }));
 
                 if stop_reason == "tool_use" && !tool_uses.is_empty() {
-                    for (_, func_name, _) in &tool_uses {
+                    for (_, func_name, args) in &tool_uses {
                         let _ = window.emit(
                             event_channel,
                             AgentProgress {
                                 stage: "tool_call".to_string(),
                                 tool_name: Some(func_name.clone()),
-                                tool_arguments: None,
+                                tool_arguments: Some(args.clone()),
                                 iteration,
                             },
                         );
@@ -2145,13 +2145,13 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                     })
                     .collect();
 
-                for (_, func_name, _) in &parsed {
+                for (_, func_name, args) in &parsed {
                     let _ = window.emit(
                         event_name,
                         AgentProgress {
                             stage: "tool_call".to_string(),
                             tool_name: Some(func_name.clone()),
-                            tool_arguments: None,
+                            tool_arguments: Some(args.clone()),
                             iteration,
                         },
                     );
