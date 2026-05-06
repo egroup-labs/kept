@@ -70,19 +70,15 @@ const SYSTEM_PROMPT: &str = r#"You are Kept, a helpful assistant and resident ar
 
 **Graph Structure**
 - Node types: conversation, provider, entity, topic, project.
-- Edge types: freeform relation label (e.g. "uses", "related_to", "part_of"). Edges connect entity nodes via `add_edge`.
+- Edge types: freeform relation labels (e.g. "uses", "related_to", "part_of") connecting entity nodes. Read-only — graph mutations happen automatically when conversations are ingested.
 
 **Tool & Workflow Guidelines**
-- **Investigate First:** Use `list_nodes`, `search_nodes`, or `search_conversation_content` to understand the graph before modifying it.
-- **Creating Entities:** Use `add_entity` to create an entity node, then `add_edge` to connect it to other existing entities. Always check if the entity already exists with `search_nodes` first.
-- **Finding Targets:** Before calling `add_edge`, use `search_nodes` or `list_nodes` to find the exact node IDs of source and target. Both nodes must exist.
+- **Investigate:** Use `list_nodes`, `search_nodes`, `get_neighbors`, or `search_conversation_content` to explore the graph and find evidence.
 - **Tool Routing:** Use graph tools for structure ("what connects to what?"). Use `search_conversation_content` for specific text, evidence, wording, or themes.
 - **Visuals:** Use `highlight_nodes` to help users visually inspect important identified nodes.
-- **Scope:** Only create nodes and edges the user explicitly asked for. Do not speculatively add extra nodes.
 - **Honesty:** If you cannot find relevant conversations, state so clearly.
 
 **Action & Curation Rules**
-- **Modifications:** Always confirm destructive operations (removals) before execution. Briefly summarize any graph changes after making them.
 - **Synthesis:** Synthesize insights across multiple conversations when creating reports.
 - **Citation:** Always cite sources by conversation title.
 
@@ -988,7 +984,6 @@ pub async fn cmd_agent_chat(
     window: Window,
     db: State<'_, DbState>,
     kg: State<'_, crate::commands::KgState>,
-    cache: State<'_, crate::commands::GraphCacheState>,
     consent: State<'_, crate::commands::CodeConsentState>,
     cancel_state: State<'_, crate::commands::AgentCancelState>,
     request: AgentChatRequest,
@@ -1302,15 +1297,7 @@ pub async fn cmd_agent_chat(
                             })) => res,
                         };
 
-                        let mut needs_cache_clear = false;
                         for ((tc_id, func_name, args), result) in parsed.into_iter().zip(results) {
-                            match func_name.as_str() {
-                                "add_edge" | "remove_edge" | "add_entity" | "remove_node" => {
-                                    needs_cache_clear = true;
-                                }
-                                _ => {}
-                            }
-
                             tool_executions.push(ToolExecution {
                                 tool_name: func_name.clone(),
                                 arguments: args,
@@ -1338,11 +1325,6 @@ pub async fn cmd_agent_chat(
                                     "tool_call_id": tc_id,
                                     "content": result,
                                 }));
-                            }
-                        }
-                        if needs_cache_clear {
-                            if let Ok(mut c) = cache.0.lock() {
-                                c.clear();
                             }
                         }
                     }
@@ -1585,15 +1567,7 @@ pub async fn cmd_agent_chat(
                     };
 
                     let mut tool_results: Vec<serde_json::Value> = Vec::new();
-                    let mut needs_cache_clear = false;
                     for ((tc_id, func_name, args), result) in tool_uses.into_iter().zip(results) {
-                        match func_name.as_str() {
-                            "add_edge" | "remove_edge" | "add_entity" | "remove_node" => {
-                                needs_cache_clear = true;
-                            }
-                            _ => {}
-                        }
-
                         tool_executions.push(ToolExecution {
                             tool_name: func_name.clone(),
                             arguments: args,
@@ -1615,11 +1589,6 @@ pub async fn cmd_agent_chat(
                             "tool_use_id": tc_id,
                             "content": result,
                         }));
-                    }
-                    if needs_cache_clear {
-                        if let Ok(mut c) = cache.0.lock() {
-                            c.clear();
-                        }
                     }
 
                     messages.push(serde_json::json!({

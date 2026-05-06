@@ -21,9 +21,8 @@ fn clean_snippet(s: &str) -> String {
     out.replace("\\n", " ")
 }
 
-/// Returns 10 tools for the KG agent: search_conversation_content,
-/// highlight_nodes, list_nodes, search_nodes, get_neighbors, get_stats,
-/// add_edge, remove_edge, add_entity, remove_node.
+/// Returns 6 tools for the KG agent: search_conversation_content,
+/// highlight_nodes, list_nodes, search_nodes, get_neighbors, get_stats.
 pub fn register_kg() -> Vec<ToolDef> {
     vec![
         // ── search_conversation_content ─────────────────────────────────────
@@ -136,90 +135,6 @@ pub fn register_kg() -> Vec<ToolDef> {
             description: "Get aggregate statistics about the knowledge graph: entity count, triple count, conversation count, project count, and top entities.",
             parameters: vec![],
             handler: Box::new(GetStats),
-        },
-        // ── add_edge ────────────────────────────────────────────────────────
-        ToolDef {
-            name: "add_edge",
-            description: "Add a directed relationship (triple) between two nodes in the knowledge graph.",
-            parameters: vec![
-                ParamDef {
-                    name: "source",
-                    param_type: ParamType::String,
-                    description: "ID of the source node",
-                    required: true,
-                },
-                ParamDef {
-                    name: "target",
-                    param_type: ParamType::String,
-                    description: "ID of the target node",
-                    required: true,
-                },
-                ParamDef {
-                    name: "relation",
-                    param_type: ParamType::String,
-                    description: "Relation label (e.g. 'uses', 'related_to', 'part_of')",
-                    required: true,
-                },
-            ],
-            handler: Box::new(AddEdge),
-        },
-        // ── remove_edge ─────────────────────────────────────────────────────
-        ToolDef {
-            name: "remove_edge",
-            description: "Remove a directed relationship (triple) between two nodes in the knowledge graph.",
-            parameters: vec![
-                ParamDef {
-                    name: "source",
-                    param_type: ParamType::String,
-                    description: "ID of the source node",
-                    required: true,
-                },
-                ParamDef {
-                    name: "target",
-                    param_type: ParamType::String,
-                    description: "ID of the target node",
-                    required: true,
-                },
-                ParamDef {
-                    name: "relation",
-                    param_type: ParamType::String,
-                    description: "Relation label to remove",
-                    required: true,
-                },
-            ],
-            handler: Box::new(RemoveEdge),
-        },
-        // ── add_entity ──────────────────────────────────────────────────────
-        ToolDef {
-            name: "add_entity",
-            description: "Add a new entity node to the knowledge graph.",
-            parameters: vec![
-                ParamDef {
-                    name: "name",
-                    param_type: ParamType::String,
-                    description: "Display name of the entity",
-                    required: true,
-                },
-                ParamDef {
-                    name: "entity_type",
-                    param_type: ParamType::String,
-                    description: "Semantic type: 'technology', 'person', 'concept', 'method', 'tool', etc.",
-                    required: false,
-                },
-            ],
-            handler: Box::new(AddEntity),
-        },
-        // ── remove_node ─────────────────────────────────────────────────────
-        ToolDef {
-            name: "remove_node",
-            description: "Remove a node and all its associated edges and mentions from the knowledge graph.",
-            parameters: vec![ParamDef {
-                name: "node_id",
-                param_type: ParamType::String,
-                description: "ID of the node to remove",
-                required: true,
-            }],
-            handler: Box::new(RemoveNode),
         },
     ]
 }

@@ -107,10 +107,6 @@ const DEFAULT_TOOLS_MD: &str = r#"# Tools
 - **search_nodes** - Search for nodes by keyword. Returns matching nodes and edges.
 - **get_neighbors** - Get all directly connected nodes and edges for a given node.
 - **get_stats** - Get aggregate statistics: entity count, triple count, conversation count, top entities.
-- **add_edge** - Add a directed relationship between two nodes.
-- **remove_edge** - Remove a directed relationship between two nodes.
-- **add_entity** - Add a new entity node to the knowledge graph.
-- **remove_node** - Remove a node and all its associated edges and mentions.
 "#;
 
 /// Initialize the ~/.kept/ directory structure and generate token if needed.
