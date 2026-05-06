@@ -208,6 +208,18 @@ fn normalize_math(content: &str) -> String {
     result
 }
 
+/// Format tool arguments JSON into a comma-separated `key=jsonValue` list.
+/// Values are JSON-stringified so strings keep their quotes.
+fn format_tool_args(args: &serde_json::Value) -> String {
+    let Some(obj) = args.as_object() else {
+        return String::new();
+    };
+    obj.iter()
+        .map(|(k, v)| format!("{}={}", k, serde_json::to_string(v).unwrap_or_else(|_| "null".into())))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Render markdown from an IngestPayload (matching extension format).
 fn render_markdown(payload: &IngestPayload) -> String {
     let mut md = String::new();
@@ -252,6 +264,20 @@ fn render_markdown(payload: &IngestPayload) -> String {
             md.push_str(&format!("### {} — {}\n\n", role_display, ts));
         } else {
             md.push_str(&format!("### {}\n\n", role_display));
+        }
+
+        if let Some(reasoning) = msg.reasoning.as_deref().filter(|s| !s.trim().is_empty()) {
+            md.push_str("<!-- kept:thinking -->\n");
+            md.push_str(reasoning.trim_end());
+            md.push_str("\n<!-- /kept:thinking -->\n\n");
+        }
+
+        if let Some(tools) = msg.tool_calls.as_ref().filter(|v| !v.is_empty()) {
+            md.push_str("<!-- kept:tools -->\n");
+            for t in tools {
+                md.push_str(&format!("- {}({})\n", t.name, format_tool_args(&t.arguments)));
+            }
+            md.push_str("<!-- /kept:tools -->\n\n");
         }
 
         md.push_str(&msg.content);
@@ -561,4 +587,78 @@ pub fn save_images(
     }
 
     results
+}
+
+#[cfg(test)]
+mod transparency_render_tests {
+    use super::render_markdown;
+    use crate::models::{IngestPayload, Message, ToolCallRecord};
+    use serde_json::json;
+
+    fn payload_with(messages: Vec<Message>) -> IngestPayload {
+        IngestPayload {
+            conversation_id: "c1".into(),
+            platform: "kept".into(),
+            title: "Test".into(),
+            model: None,
+            messages,
+            created_at: Some("2026-05-04T00:00:00Z".into()),
+            updated_at: None,
+            markdown: None,
+            images: None,
+        }
+    }
+
+    #[test]
+    fn renders_thinking_and_tools_comments_for_assistant() {
+        let p = payload_with(vec![
+            Message {
+                role: "user".into(),
+                content: "hi".into(),
+                timestamp: None,
+                attachments: None,
+                reasoning: None,
+                tool_calls: None,
+            },
+            Message {
+                role: "assistant".into(),
+                content: "Here's what I found.".into(),
+                timestamp: None,
+                attachments: None,
+                reasoning: Some("Step 1: search".into()),
+                tool_calls: Some(vec![ToolCallRecord {
+                    name: "search_nodes".into(),
+                    arguments: json!({"query": "rust", "limit": 10}),
+                }]),
+            },
+        ]);
+        let md = render_markdown(&p);
+        assert!(md.contains("<!-- kept:thinking -->\nStep 1: search\n<!-- /kept:thinking -->"));
+        assert!(md.contains("<!-- kept:tools -->"));
+        // serde_json::Map is BTreeMap by default → keys sort alphabetically.
+        assert!(md.contains("- search_nodes("));
+        assert!(md.contains("query=\"rust\""));
+        assert!(md.contains("limit=10"));
+        assert!(md.contains("Here's what I found."));
+        let t_idx = md.find("<!-- kept:thinking -->").unwrap();
+        let l_idx = md.find("<!-- kept:tools -->").unwrap();
+        let c_idx = md.find("Here's what I found.").unwrap();
+        assert!(t_idx < l_idx && l_idx < c_idx);
+    }
+
+    #[test]
+    fn omits_blocks_when_fields_absent() {
+        let p = payload_with(vec![Message {
+            role: "assistant".into(),
+            content: "Hello.".into(),
+            timestamp: None,
+            attachments: None,
+            reasoning: None,
+            tool_calls: None,
+        }]);
+        let md = render_markdown(&p);
+        assert!(!md.contains("kept:thinking"));
+        assert!(!md.contains("kept:tools"));
+        assert!(md.contains("Hello."));
+    }
 }
