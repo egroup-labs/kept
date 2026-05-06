@@ -69,6 +69,7 @@ export function useScale() {
 
 interface ChatContainerProps {
   onSendMessage?: (text: string, model: string, attachments?: ChatAttachment[]) => void;
+  onStop?: () => void;
   loading?: boolean;
   models?: ChatModelOption[];
   preferredModelIds?: string[];
@@ -142,7 +143,7 @@ function getClippingRect(element: HTMLElement): { top: number; bottom: number } 
 }
 
 const ChatContainer = forwardRef<ChatContainerHandle, ChatContainerProps>(function ChatContainer(
-  { onSendMessage, loading, models = [], preferredModelIds = [], onConfigureModels, onDropdownOpenChange },
+  { onSendMessage, onStop, loading, models = [], preferredModelIds = [], onConfigureModels, onDropdownOpenChange },
   ref,
 ) {
   const scale = useScale();
@@ -898,7 +899,7 @@ const ChatContainer = forwardRef<ChatContainerHandle, ChatContainerProps>(functi
                 </Squircle>
               </div>
 
-              {/* Send button */}
+              {/* Send / Stop button */}
               <Squircle
                 width={sendBtnW}
                 height={btnH}
@@ -906,7 +907,9 @@ const ChatContainer = forwardRef<ChatContainerHandle, ChatContainerProps>(functi
                 shadow="shadow-[0px_2px_6px_0px_rgba(12,41,55,0.04)]"
                 className="cursor-pointer select-none active:scale-95"
                 style={{
-                  background: sendBtnHovered ? "rgba(255,255,255,0.42)" : "rgba(255,255,255,0.32)",
+                  background: loading
+                    ? (sendBtnHovered ? "rgba(248,113,113,0.55)" : "rgba(248,113,113,0.42)")
+                    : (sendBtnHovered ? "rgba(255,255,255,0.42)" : "rgba(255,255,255,0.32)"),
                   opacity: hasAvailableModels ? 1 : 0.55,
                   pointerEvents: hasAvailableModels ? "auto" : "none",
                   transition: "background 200ms ease",
@@ -915,7 +918,8 @@ const ChatContainer = forwardRef<ChatContainerHandle, ChatContainerProps>(functi
                 onMouseLeave={() => setSendBtnHovered(false)}
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleSend();
+                  if (loading) onStop?.();
+                  else handleSend();
                 }}
               >
                 <div className="flex items-center justify-center w-full h-full">
@@ -924,11 +928,11 @@ const ChatContainer = forwardRef<ChatContainerHandle, ChatContainerProps>(functi
                       fontFamily: '"DM Sans", sans-serif',
                       fontSize: s(16),
                       fontWeight: 600,
-                      color: "rgba(12,41,55,0.88)",
+                      color: loading ? "rgba(255,255,255,0.92)" : "rgba(12,41,55,0.88)",
                       letterSpacing: "-0.04em",
                     }}
                   >
-                    Send
+                    {loading ? "Stop" : "Send"}
                   </span>
                 </div>
               </Squircle>
