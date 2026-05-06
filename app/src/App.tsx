@@ -1307,6 +1307,8 @@ export default function App() {
   const reasoningStreamFlushTimerRef = useRef<number | null>(null);
   const assistantReasoningRef = useRef("");
   const activeStreamConvIdRef = useRef<string | null>(null);
+  const pendingToolsRef = useRef<{ name: string; arguments: unknown }[]>([]);
+  const [pendingToolsVersion, setPendingToolsVersion] = useState(0);
 
   const setChatStatusIfChanged = useCallback((next: string | null) => {
     setChatStatus((prev) => {
@@ -1426,6 +1428,7 @@ export default function App() {
       const stop = await listen<{
         stage: string;
         tool_name?: string;
+        tool_arguments?: unknown;
         iteration: number;
         content_delta?: string;
         reasoning_delta?: string;
@@ -1439,6 +1442,11 @@ export default function App() {
           clearStreamingBuffer();
           clearVisibleAssistantContent();
           setChatStatusIfChanged(statusLabelForTool(tool_name));
+          pendingToolsRef.current = [
+            ...pendingToolsRef.current,
+            { name: tool_name, arguments: event.payload.tool_arguments ?? {} },
+          ];
+          setPendingToolsVersion((v) => v + 1);
         } else if (stage === "tool_result") {
           setChatStatusIfChanged("Thinking");
         } else if (stage === "thinking") {
@@ -1532,14 +1540,20 @@ export default function App() {
     };
   }, []);
 
-  const persistChat = useCallback((allMessages: { role: string; content: string }[]) => {
+  const persistChat = useCallback((allMessages: ChatUiMessage[]) => {
     const now = new Date().toISOString();
     const payload: IngestPayload = {
       conversation_id: chatConvId.current,
       platform: "kept",
       title: chatTitleRef.current,
       model: chatModelRef.current,
-      messages: allMessages.map((m) => ({ role: m.role, content: m.content, timestamp: null })),
+      messages: allMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: null,
+        reasoning: m.reasoning ?? null,
+        tool_calls: m.toolCalls ?? null,
+      })),
       created_at: now,
       updated_at: now,
       markdown: null,
@@ -1555,6 +1569,8 @@ export default function App() {
     const convId = chatConvId.current;
     clearStreamingBuffer();
     assistantReasoningRef.current = "";
+    pendingToolsRef.current = [];
+    setPendingToolsVersion((v) => v + 1);
     activeStreamConvIdRef.current = convId;
     setMessages(newMessages);
     setChatActive(true);
@@ -1564,7 +1580,7 @@ export default function App() {
     // agent, error). Every save path reads from here so a late-resolving
     // title callback never overwrites a full (user + assistant) save with
     // its stale user-only copy.
-    let latestMessages: { role: string; content: string }[] = newMessages;
+    let latestMessages: ChatUiMessage[] = newMessages;
 
     const selectedModel = chatModelOptions.find((option) => option.id === model)
       ?? chatModelOptions[0]
@@ -1608,7 +1624,13 @@ export default function App() {
           platform: "kept",
           title,
           model: mapped.model,
-          messages: latestMessages.map((m) => ({ role: m.role, content: m.content, timestamp: null })),
+          messages: latestMessages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            timestamp: null,
+            reasoning: m.reasoning ?? null,
+            tool_calls: m.toolCalls ?? null,
+          })),
           created_at: now,
           updated_at: now,
           markdown: null,
@@ -1662,17 +1684,22 @@ export default function App() {
       flushStreamingBuffer();
       if (chatConvId.current !== convId) return;
       const reasoning = assistantReasoningRef.current.trim();
-      const allMessages = [
+      const allMessages: ChatUiMessage[] = [
         ...newMessages,
         {
           role: "assistant",
           content: result.content,
           reasoning: reasoning || undefined,
+          toolCalls: result.tool_executions.length > 0
+            ? result.tool_executions.map((t) => ({ name: t.tool_name, arguments: t.arguments }))
+            : undefined,
         },
       ];
       latestMessages = allMessages;
       setMessages(allMessages);
       persistChat(allMessages);
+      pendingToolsRef.current = [];
+      setPendingToolsVersion((v) => v + 1);
     } catch (err) {
       clearStreamingBuffer();
       if (chatConvId.current !== convId) return;
@@ -1800,11 +1827,20 @@ export default function App() {
     setLoading(false);
   }, [clearStreamingBuffer]);
 
-  const handleContinueChat = useCallback((msgs: { role: string; content: string }[], title: string, conversationId?: string) => {
+  const handleContinueChat = useCallback((
+    msgs: { role: string; content: string; reasoning?: string; toolCalls?: { name: string; arguments: unknown }[] }[],
+    title: string,
+    conversationId?: string,
+  ) => {
     clearStreamingBuffer();
     assistantReasoningRef.current = "";
     activeStreamConvIdRef.current = null;
-    setMessages(msgs.map(m => ({ role: m.role, content: m.content })));
+    setMessages(msgs.map(m => ({
+      role: m.role,
+      content: m.content,
+      reasoning: m.reasoning,
+      toolCalls: m.toolCalls,
+    })));
     setChatTitle(title);
     chatTitleRef.current = title;
     chatConvId.current = conversationId || crypto.randomUUID();
@@ -2107,6 +2143,11 @@ export default function App() {
                       content={msg.content}
                       attachments={msg.attachments}
                       reasoning={msg.reasoning}
+                      toolCalls={
+                        loading && i === messages.length - 1 && msg.role === "assistant"
+                          ? (pendingToolsVersion >= 0 ? pendingToolsRef.current : pendingToolsRef.current)
+                          : msg.toolCalls
+                      }
                       streaming={loading && i === messages.length - 1 && msg.role === "assistant"}
                       thinkingActive={loading && i === messages.length - 1 && msg.role === "assistant" && !!msg.reasoning?.trim() && !msg.content.trim()}
                     />
