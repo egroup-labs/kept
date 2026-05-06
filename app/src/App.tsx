@@ -85,6 +85,7 @@ type ChatUiMessage = {
   content: string;
   attachments?: ChatAttachment[];
   reasoning?: string;
+  toolCalls?: { name: string; arguments: unknown }[];
 };
 
 function buildChatModelOption(

@@ -61,6 +61,8 @@ export interface Message {
   content: string;
   timestamp: string | null;
   attachments?: Attachment[];
+  reasoning?: string | null;
+  tool_calls?: { name: string; arguments: unknown }[] | null;
 }
 
 export interface TitleRequest {
