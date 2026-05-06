@@ -3200,6 +3200,8 @@ fn parse_messages(content: &str) -> Vec<crate::models::Message> {
                         content: trimmed.to_string(),
                         timestamp: current_timestamp.take(),
                         attachments: None,
+                        reasoning: None,
+                        tool_calls: None,
                     });
                 }
             }
@@ -3236,6 +3238,8 @@ fn parse_messages(content: &str) -> Vec<crate::models::Message> {
                 content: trimmed.to_string(),
                 timestamp: current_timestamp,
                 attachments: None,
+                reasoning: None,
+                tool_calls: None,
             });
         }
     }

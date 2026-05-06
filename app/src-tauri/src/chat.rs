@@ -1033,6 +1033,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "thinking".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1153,6 +1154,7 @@ pub async fn cmd_agent_chat(
                                 AgentProgress {
                                     stage: "tool_call".to_string(),
                                     tool_name: Some(func_name.clone()),
+                                    tool_arguments: None,
                                     iteration,
                                 },
                             );
@@ -1208,6 +1210,7 @@ pub async fn cmd_agent_chat(
                                 AgentProgress {
                                     stage: "tool_result".to_string(),
                                     tool_name: Some(func_name),
+                                    tool_arguments: None,
                                     iteration,
                                 },
                             );
@@ -1246,6 +1249,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "done".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1297,6 +1301,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "thinking".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1395,6 +1400,7 @@ pub async fn cmd_agent_chat(
                             AgentProgress {
                                 stage: "tool_call".to_string(),
                                 tool_name: Some(func_name.clone()),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -1448,6 +1454,7 @@ pub async fn cmd_agent_chat(
                             AgentProgress {
                                 stage: "tool_result".to_string(),
                                 tool_name: Some(func_name),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -1480,6 +1487,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "done".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1794,6 +1802,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                 AgentProgress {
                     stage: "thinking".to_string(),
                     tool_name: None,
+                    tool_arguments: None,
                     iteration,
                 },
             );
@@ -1868,6 +1877,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                         AgentProgress {
                             stage: "tool_call".to_string(),
                             tool_name: Some(tool_name.clone()),
+                            tool_arguments: None,
                             iteration,
                         },
                     );
@@ -1945,6 +1955,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                 AgentProgress {
                     stage: "done".to_string(),
                     tool_name: None,
+                    tool_arguments: None,
                     iteration,
                 },
             );
@@ -1960,6 +1971,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
             AgentProgress {
                 stage: "done".to_string(),
                 tool_name: None,
+                tool_arguments: None,
                 iteration,
             },
         );
@@ -1993,6 +2005,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
             AgentProgress {
                 stage: "thinking".to_string(),
                 tool_name: None,
+                tool_arguments: None,
                 iteration,
             },
         );
@@ -2037,6 +2050,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                                     retries,
                                     wait.as_secs()
                                 )),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -2058,6 +2072,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                                     retries,
                                     wait.as_secs()
                                 )),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -2136,6 +2151,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                         AgentProgress {
                             stage: "tool_call".to_string(),
                             tool_name: Some(func_name.clone()),
+                            tool_arguments: None,
                             iteration,
                         },
                     );
@@ -2213,6 +2229,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
             AgentProgress {
                 stage: "done".to_string(),
                 tool_name: None,
+                tool_arguments: None,
                 iteration,
             },
         );
@@ -2228,6 +2245,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
         AgentProgress {
             stage: "done".to_string(),
             tool_name: None,
+            tool_arguments: None,
             iteration,
         },
     );
