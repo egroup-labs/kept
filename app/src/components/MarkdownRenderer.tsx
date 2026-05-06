@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -278,46 +278,10 @@ function repairPathologicalTokenLinebreaks(content: string): string {
     .join("");
 }
 
-function useStreamingContent(content: string, streaming: boolean): string {
-  const [visible, setVisible] = useState(content);
-  const latestRef = useRef(content);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    latestRef.current = content;
-    if (!streaming) {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-      setVisible(content);
-      return;
-    }
-
-    if (timerRef.current === null) {
-      timerRef.current = window.setTimeout(() => {
-        timerRef.current = null;
-        setVisible(latestRef.current);
-      }, 120);
-    }
-  }, [content, streaming]);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current);
-      }
-    };
-  }, []);
-
-  return visible;
-}
-
 export default memo(function MarkdownRenderer({ content, className = "chat-markdown", streaming = false }: MarkdownRendererProps) {
-  const visibleContent = useStreamingContent(content, streaming);
   const normalized = useMemo(
-    () => normalizeMarkdown(repairPathologicalTokenLinebreaks(stripTransientStreamingFence(visibleContent, streaming))),
-    [visibleContent, streaming],
+    () => normalizeMarkdown(repairPathologicalTokenLinebreaks(stripTransientStreamingFence(content, streaming))),
+    [content, streaming],
   );
 
   return (
