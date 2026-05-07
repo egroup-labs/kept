@@ -25,17 +25,26 @@ export interface ConversationMessage {
 const THINKING_RE = /<!--\s*kept:thinking\s*-->\s*([\s\S]*?)\s*<!--\s*\/kept:thinking\s*-->/;
 const TOOLS_RE = /<!--\s*kept:tools\s*-->\s*([\s\S]*?)\s*<!--\s*\/kept:tools\s*-->/;
 
-/** Split `key=jsonVal, key=jsonVal` respecting double-quoted strings. */
+/** Split `key=jsonVal, key=jsonVal` respecting double-quoted strings and
+ * `{}`/`[]` nesting so commas inside JSON object/array values don't split. */
 function splitArgs(s: string): string[] {
   const out: string[] = [];
   let buf = '';
   let inStr = false;
   let escape = false;
+  let depth = 0;
   for (const ch of s) {
     if (escape) { buf += ch; escape = false; continue; }
-    if (ch === '\\' && inStr) { buf += ch; escape = true; continue; }
-    if (ch === '"') { inStr = !inStr; buf += ch; continue; }
-    if (ch === ',' && !inStr) {
+    if (inStr) {
+      if (ch === '\\') { buf += ch; escape = true; continue; }
+      if (ch === '"') { inStr = false; buf += ch; continue; }
+      buf += ch;
+      continue;
+    }
+    if (ch === '"') { inStr = true; buf += ch; continue; }
+    if (ch === '{' || ch === '[') { depth++; buf += ch; continue; }
+    if (ch === '}' || ch === ']') { if (depth > 0) depth--; buf += ch; continue; }
+    if (ch === ',' && depth === 0) {
       if (buf.trim()) out.push(buf.trim());
       buf = '';
       continue;
