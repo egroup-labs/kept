@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/egroup-labs-kept-badge.png)](https://mseep.ai/app/egroup-labs-kept)
+
 # Kept
 
 <p align="center">
