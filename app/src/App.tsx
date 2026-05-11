@@ -1946,17 +1946,29 @@ export default function App() {
   const showChatActivity = loading && !hasVisibleStreamingAssistant;
 
   return (
-    <div
-      className="h-full w-full transition-[padding] duration-500 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
-      style={{
-        padding: isMaximized ? 0 : "6px 8px 8px",
-      }}
-      onMouseDown={(e) => {
-        if (e.button === 0 && e.target === e.currentTarget) {
-          getCurrentWindow().startDragging();
-        }
-      }}
-    >
+    // Root wrapper is `position: relative` so ResizeGrips (which uses absolute
+    // top/left/right/bottom = 0) anchors to the window edge, NOT to the padded
+    // inner wrapper. Putting ResizeGrips inside #kept-app-container previously
+    // meant the rounded `overflow: hidden` mask clipped the corner hit zones
+    // away from the visual corner, so resize gestures only worked at the
+    // actual OS window edge. ResizeGrips sits as a sibling of the padded
+    // wrapper, and its z-50 stacking context puts it above the inner content.
+    //
+    // The outer wrapper no longer has an onMouseDown drag handler: window
+    // dragging is provided by Titlebar.tsx (which has its own invisible
+    // drag surface covering the whole titlebar). The former handler captured
+    // every click in the 6-8px padding region and called startDragging(),
+    // which on macOS 26 — where transparency degraded to opaque white and
+    // made the padding look like part of the app — intercepted gestures the
+    // user expected to land on the resize grips.
+    <div className="relative h-full w-full">
+      {!isMaximized && <ResizeGrips />}
+      <div
+        className="h-full w-full transition-[padding] duration-500 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
+        style={{
+          padding: isMaximized ? 0 : "6px 8px 8px",
+        }}
+      >
       <div
         id="kept-app-container"
         ref={containerRef}
@@ -4103,7 +4115,7 @@ export default function App() {
             )}
           </div>
         )}
-        {!isMaximized && <ResizeGrips />}
+      </div>
       </div>
     </div>
   );
