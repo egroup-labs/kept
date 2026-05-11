@@ -170,12 +170,71 @@ pub fn run() {
                         Err(e) => log::warn!("Digest startup promotion failed: {}", e),
                     }
 
-                    // Periodic idle summarizer — forever (until process exit)
+                    // Periodic idle summarizer — forever (until process exit).
+                    //
+                    // Circuit breaker: when consecutive ticks come back
+                    // dominated by 429 rate-limit errors, the loop is paused
+                    // for an hour. Without this, a user on a low-tier API key
+                    // (Anthropic tier 1 = 30K input TPM) gets their key billed
+                    // every minute even though most calls fail — every call
+                    // that *does* sneak past the rate limit is a real billed
+                    // request, and we've seen this drain a $25 cap overnight.
+                    const RATE_LIMIT_STREAK_LIMIT: u32 = 3;
+                    const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+                    let mut rate_limit_streak: u32 = 0;
+                    let mut cooldown_until: Option<std::time::Instant> = None;
                     loop {
                         tokio::time::sleep(Duration::from_secs(60)).await;
+                        if let Some(until) = cooldown_until {
+                            if std::time::Instant::now() < until {
+                                continue;
+                            }
+                            log::info!("Idle summarizer: rate-limit cooldown elapsed, resuming");
+                            cooldown_until = None;
+                            rate_limit_streak = 0;
+                        }
                         match commands::run_idle_summarizer(db.clone(), kg.clone()).await {
-                            Ok(0) => {} // nothing new, quiet
-                            Ok(n) => log::info!("Idle summarizer: processed {} conversations", n),
+                            Ok(stats) => {
+                                let attempted = stats.ok
+                                    + stats.rate_limited
+                                    + stats.other_failed
+                                    + stats.skipped;
+                                if attempted == 0 {
+                                    rate_limit_streak = 0;
+                                } else if stats.rate_limited > 0 && stats.ok == 0 {
+                                    rate_limit_streak += 1;
+                                    log::warn!(
+                                        "Idle summarizer: tick rate-limited \
+                                         ({} rl / {} other / {} skipped), streak {}/{}",
+                                        stats.rate_limited,
+                                        stats.other_failed,
+                                        stats.skipped,
+                                        rate_limit_streak,
+                                        RATE_LIMIT_STREAK_LIMIT
+                                    );
+                                    if rate_limit_streak >= RATE_LIMIT_STREAK_LIMIT {
+                                        log::warn!(
+                                            "Idle summarizer: pausing for {}s after \
+                                             {} consecutive rate-limited ticks",
+                                            RATE_LIMIT_COOLDOWN.as_secs(),
+                                            rate_limit_streak
+                                        );
+                                        cooldown_until =
+                                            Some(std::time::Instant::now() + RATE_LIMIT_COOLDOWN);
+                                    }
+                                } else {
+                                    if stats.ok > 0 || stats.skipped > 0 {
+                                        log::info!(
+                                            "Idle summarizer: ok={} rl={} other={} skipped={}",
+                                            stats.ok,
+                                            stats.rate_limited,
+                                            stats.other_failed,
+                                            stats.skipped
+                                        );
+                                    }
+                                    rate_limit_streak = 0;
+                                }
+                            }
                             Err(e) => log::warn!("Idle summarizer tick failed: {}", e),
                         }
                     }
@@ -336,6 +395,8 @@ pub fn run() {
             commands::cmd_reveal_file,
             commands::cmd_validate_path,
             commands::cmd_respond_code_consent,
+            commands::cmd_idle_summarizer_status,
+            commands::cmd_resume_idle_summarizer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
