@@ -1519,9 +1519,14 @@ async fn call_anthropic_digest(model: &str, api_key: &str, prompt: &str) -> Resu
         "max_tokens": 2048,
         "messages": [{"role": "user", "content": prompt}]
     });
+    // KEPT_ANTHROPIC_BASE_URL lets us point the digest path at a local mock
+    // server for rate-limit / burn-rate testing (see scripts/mock-anthropic-429.py).
+    // Production code path is unchanged when the variable is unset.
+    let url = std::env::var("KEPT_ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://api.anthropic.com/v1/messages".to_string());
     let client = reqwest::Client::new();
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(&url)
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("Content-Type", "application/json")
