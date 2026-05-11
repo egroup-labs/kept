@@ -9,6 +9,39 @@ use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tauri::{Emitter, State, Window};
+use tokio_util::sync::CancellationToken;
+
+/// Partial state captured while the agent loop runs, so a cancel can save
+/// whatever was already produced.
+#[derive(Default)]
+struct PartialAccumulator {
+    content: String,
+    reasoning: String,
+    tool_calls: Vec<crate::models::ToolCallRecord>,
+}
+
+async fn emit_cancelled(
+    window: &Window,
+    conversation_id: Option<&str>,
+    iteration: u32,
+    acc: &mut PartialAccumulator,
+) -> AgentChatResponse {
+    let _ = window.emit(
+        "agent-cancelled",
+        serde_json::json!({
+            "conversation_id": conversation_id,
+            "content": acc.content,
+            "reasoning": acc.reasoning,
+            "tool_calls": acc.tool_calls,
+            "iteration": iteration,
+        }),
+    );
+    AgentChatResponse {
+        content: std::mem::take(&mut acc.content),
+        tool_executions: Vec::new(),
+        iterations: iteration,
+    }
+}
 
 /// Returns true when the app is in restricted privacy mode.
 fn is_restricted(cfg: &crate::models::AppConfig) -> bool {
@@ -37,19 +70,15 @@ const SYSTEM_PROMPT: &str = r#"You are Kept, a helpful assistant and resident ar
 
 **Graph Structure**
 - Node types: conversation, provider, entity, topic, project.
-- Edge types: freeform relation label (e.g. "uses", "related_to", "part_of"). Edges connect entity nodes via `add_edge`.
+- Edge types: freeform relation labels (e.g. "uses", "related_to", "part_of") connecting entity nodes. Read-only — graph mutations happen automatically when conversations are ingested.
 
 **Tool & Workflow Guidelines**
-- **Investigate First:** Use `list_nodes`, `search_nodes`, or `search_conversation_content` to understand the graph before modifying it.
-- **Creating Entities:** Use `add_entity` to create an entity node, then `add_edge` to connect it to other existing entities. Always check if the entity already exists with `search_nodes` first.
-- **Finding Targets:** Before calling `add_edge`, use `search_nodes` or `list_nodes` to find the exact node IDs of source and target. Both nodes must exist.
+- **Investigate:** Use `list_nodes`, `search_nodes`, `get_neighbors`, or `search_conversation_content` to explore the graph and find evidence.
 - **Tool Routing:** Use graph tools for structure ("what connects to what?"). Use `search_conversation_content` for specific text, evidence, wording, or themes.
 - **Visuals:** Use `highlight_nodes` to help users visually inspect important identified nodes.
-- **Scope:** Only create nodes and edges the user explicitly asked for. Do not speculatively add extra nodes.
 - **Honesty:** If you cannot find relevant conversations, state so clearly.
 
 **Action & Curation Rules**
-- **Modifications:** Always confirm destructive operations (removals) before execution. Briefly summarize any graph changes after making them.
 - **Synthesis:** Synthesize insights across multiple conversations when creating reports.
 - **Citation:** Always cite sources by conversation title.
 
@@ -406,7 +435,7 @@ struct OpenAiStreamState {
     content: String,
     finish_reason: Option<String>,
     reasoning: String,
-    reasoning_details: Vec<serde_json::Value>,
+    reasoning_details: BTreeMap<usize, serde_json::Value>,
     tool_calls: BTreeMap<usize, (String, String, String)>,
 }
 
@@ -426,7 +455,17 @@ impl OpenAiStreamState {
             message["reasoning"] = serde_json::Value::String(self.reasoning);
         }
         if !self.reasoning_details.is_empty() {
-            message["reasoning_details"] = serde_json::Value::Array(self.reasoning_details);
+            let details: Vec<serde_json::Value> = self
+                .reasoning_details
+                .into_values()
+                .map(|mut v| {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.remove("index");
+                    }
+                    v
+                })
+                .collect();
+            message["reasoning_details"] = serde_json::Value::Array(details);
         }
 
         if !self.tool_calls.is_empty() {
@@ -480,6 +519,38 @@ fn reasoning_detail_text(detail: &serde_json::Value) -> Option<String> {
         None
     } else {
         Some(text.to_string())
+    }
+}
+
+/// Merge a streaming `reasoning_details` delta entry into an accumulated entry.
+///
+/// String fields that the provider streams in chunks (`text`, `summary`, `data`)
+/// are concatenated. All other fields (`type`, `id`, `format`, `signature`, …)
+/// are copied/overwritten — `signature` in particular arrives once at the end
+/// and must replace any prior placeholder. Without this, blocks reassembled
+/// from extending the array verbatim end up with mismatched signatures, which
+/// Anthropic rejects on the next turn ("Invalid signature in thinking block").
+fn merge_reasoning_detail(target: &mut serde_json::Value, src: &serde_json::Value) {
+    let (Some(t), Some(s)) = (target.as_object_mut(), src.as_object()) else {
+        return;
+    };
+    for (k, v) in s {
+        match k.as_str() {
+            "text" | "summary" | "data" => {
+                if let Some(new_str) = v.as_str() {
+                    let existing = t.get(k).and_then(|x| x.as_str()).unwrap_or("");
+                    t.insert(
+                        k.clone(),
+                        serde_json::Value::String(format!("{existing}{new_str}")),
+                    );
+                } else {
+                    t.insert(k.clone(), v.clone());
+                }
+            }
+            _ => {
+                t.insert(k.clone(), v.clone());
+            }
+        }
     }
 }
 
@@ -546,7 +617,17 @@ fn apply_openai_stream_payload(
         );
     }
     if let Some(details) = delta["reasoning_details"].as_array() {
-        state.reasoning_details.extend(details.iter().cloned());
+        for d in details {
+            let index = d["index"]
+                .as_u64()
+                .map(|x| x as usize)
+                .unwrap_or_else(|| state.reasoning_details.len());
+            let entry = state
+                .reasoning_details
+                .entry(index)
+                .or_insert_with(|| serde_json::json!({}));
+            merge_reasoning_detail(entry, d);
+        }
     }
 
     if let Some(calls) = delta["tool_calls"].as_array() {
@@ -588,6 +669,7 @@ async fn read_openai_streaming_response(
     channel: &str,
     conversation_id: Option<&str>,
     iteration: u32,
+    cancel_token: &CancellationToken,
 ) -> Result<serde_json::Value, String> {
     let content_type = response_header_value(&resp, CONTENT_TYPE);
     if !content_type.contains("text/event-stream") {
@@ -598,18 +680,29 @@ async fn read_openai_streaming_response(
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Failed to read {label} stream: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        for payload in drain_sse_payloads(&mut buffer) {
-            apply_openai_stream_payload(
-                &payload,
-                &mut state,
-                window,
-                channel,
-                conversation_id,
-                iteration,
-            )?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            next = stream.next() => {
+                match next {
+                    Some(chunk) => {
+                        let chunk = chunk.map_err(|e| format!("Failed to read {label} stream: {e}"))?;
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        for payload in drain_sse_payloads(&mut buffer) {
+                            apply_openai_stream_payload(
+                                &payload,
+                                &mut state,
+                                window,
+                                channel,
+                                conversation_id,
+                                iteration,
+                            )?;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 
@@ -833,23 +926,35 @@ async fn read_anthropic_streaming_response(
     channel: &str,
     conversation_id: Option<&str>,
     iteration: u32,
+    cancel_token: &CancellationToken,
 ) -> Result<serde_json::Value, String> {
     let mut state = AnthropicStreamState::default();
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Failed to read Anthropic stream: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        for payload in drain_sse_payloads(&mut buffer) {
-            apply_anthropic_stream_payload(
-                &payload,
-                &mut state,
-                window,
-                channel,
-                conversation_id,
-                iteration,
-            )?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            next = stream.next() => {
+                match next {
+                    Some(chunk) => {
+                        let chunk = chunk.map_err(|e| format!("Failed to read Anthropic stream: {e}"))?;
+                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        for payload in drain_sse_payloads(&mut buffer) {
+                            apply_anthropic_stream_payload(
+                                &payload,
+                                &mut state,
+                                window,
+                                channel,
+                                conversation_id,
+                                iteration,
+                            )?;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 
@@ -931,13 +1036,39 @@ pub async fn cmd_agent_chat(
     window: Window,
     db: State<'_, DbState>,
     kg: State<'_, crate::commands::KgState>,
-    cache: State<'_, crate::commands::GraphCacheState>,
     consent: State<'_, crate::commands::CodeConsentState>,
+    cancel_state: State<'_, crate::commands::AgentCancelState>,
     request: AgentChatRequest,
 ) -> Result<AgentChatResponse, String> {
     let cfg = config::read_config()?;
     let restricted = is_restricted(&cfg);
     let conv_id = request.conversation_id.clone();
+    let cancel_key = conv_id
+        .clone()
+        .unwrap_or_else(|| format!("anon-{}", uuid::Uuid::new_v4()));
+
+    let cancel_token = CancellationToken::new();
+    if let Ok(mut map) = cancel_state.0.lock() {
+        map.insert(cancel_key.clone(), cancel_token.clone());
+    }
+
+    struct CancelGuard<'a> {
+        state: &'a crate::commands::AgentCancelState,
+        key: String,
+    }
+    impl Drop for CancelGuard<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut map) = self.state.0.lock() {
+                map.remove(&self.key);
+            }
+        }
+    }
+    let _cancel_guard = CancelGuard {
+        state: &cancel_state,
+        key: cancel_key.clone(),
+    };
+
+    let mut accumulated = PartialAccumulator::default();
 
     // System prompt: unified prompt with runtime context and tools.md appended.
     let tools_md = config::tools_md_path()
@@ -1024,6 +1155,9 @@ pub async fn cmd_agent_chat(
 
             loop {
                 iteration += 1;
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
                 if iteration > MAX_ITERATIONS {
                     return Err("Agent reached maximum iteration limit".to_string());
                 }
@@ -1033,6 +1167,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "thinking".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1104,6 +1239,7 @@ pub async fn cmd_agent_chat(
                         event_channel,
                         conv_id.as_deref(),
                         iteration,
+                        &cancel_token,
                     )
                     .await?
                 };
@@ -1127,6 +1263,22 @@ pub async fn cmd_agent_chat(
 
                 messages.push(message_val.clone());
 
+                // Capture partial content/reasoning into the accumulator so a
+                // cancel after this point still saves them. Replace each
+                // iteration; the latest assistant turn is the canonical state.
+                accumulated.content = message_val["content"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                accumulated.reasoning = message_val["reasoning"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
+
                 if use_tools && finish_reason == "tool_calls" {
                     if let Some(tool_calls) = message_val["tool_calls"].as_array() {
                         // Parse all tool calls upfront
@@ -1147,12 +1299,17 @@ pub async fn cmd_agent_chat(
                             })
                             .collect();
 
-                        for (_, func_name, _) in &parsed {
+                        for (_, func_name, args) in &parsed {
+                            accumulated.tool_calls.push(crate::models::ToolCallRecord {
+                                name: func_name.clone(),
+                                arguments: args.clone(),
+                            });
                             let _ = window.emit(
                                 event_channel,
                                 AgentProgress {
                                     stage: "tool_call".to_string(),
                                     tool_name: Some(func_name.clone()),
+                                    tool_arguments: Some(args.clone()),
                                     iteration,
                                 },
                             );
@@ -1182,21 +1339,17 @@ pub async fn cmd_agent_chat(
                         };
 
                         // Execute all tools in parallel
-                        let results =
-                            join_all(parsed.iter().map(|(_, func_name, args)| {
-                                registry.execute(func_name, args, &ctx)
-                            }))
-                            .await;
-
-                        let mut needs_cache_clear = false;
-                        for ((tc_id, func_name, args), result) in parsed.into_iter().zip(results) {
-                            match func_name.as_str() {
-                                "add_edge" | "remove_edge" | "add_entity" | "remove_node" => {
-                                    needs_cache_clear = true;
-                                }
-                                _ => {}
+                        let results = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
                             }
+                            res = join_all(parsed.iter().map(|(_, func_name, args)| {
+                                registry.execute(func_name, args, &ctx)
+                            })) => res,
+                        };
 
+                        for ((tc_id, func_name, args), result) in parsed.into_iter().zip(results) {
                             tool_executions.push(ToolExecution {
                                 tool_name: func_name.clone(),
                                 arguments: args,
@@ -1208,6 +1361,7 @@ pub async fn cmd_agent_chat(
                                 AgentProgress {
                                     stage: "tool_result".to_string(),
                                     tool_name: Some(func_name),
+                                    tool_arguments: None,
                                     iteration,
                                 },
                             );
@@ -1223,11 +1377,6 @@ pub async fn cmd_agent_chat(
                                     "tool_call_id": tc_id,
                                     "content": result,
                                 }));
-                            }
-                        }
-                        if needs_cache_clear {
-                            if let Ok(mut c) = cache.0.lock() {
-                                c.clear();
                             }
                         }
                     }
@@ -1246,6 +1395,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "done".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1288,6 +1438,9 @@ pub async fn cmd_agent_chat(
 
             loop {
                 iteration += 1;
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
                 if iteration > MAX_ITERATIONS {
                     return Err("Agent reached maximum iteration limit".to_string());
                 }
@@ -1297,6 +1450,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "thinking".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1353,6 +1507,7 @@ pub async fn cmd_agent_chat(
                     event_channel,
                     conv_id.as_deref(),
                     iteration,
+                    &cancel_token,
                 )
                 .await?;
 
@@ -1388,13 +1543,44 @@ pub async fn cmd_agent_chat(
                     "content": json["content"],
                 }));
 
+                // Capture text content into accumulator. Anthropic doesn't have a
+                // separate streamed reasoning text field on the response root —
+                // thinking blocks live inside content; combine plain text parts.
+                accumulated.content = text_parts.join("");
+                // Reasoning: pull from any thinking blocks within content.
+                if let Some(blocks) = json["content"].as_array() {
+                    let thinking: String = blocks
+                        .iter()
+                        .filter_map(|b| {
+                            if b["type"].as_str() == Some("thinking") {
+                                b["thinking"].as_str().map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !thinking.is_empty() {
+                        accumulated.reasoning = thinking;
+                    }
+                }
+
+                if cancel_token.is_cancelled() {
+                    return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                }
+
                 if stop_reason == "tool_use" && !tool_uses.is_empty() {
-                    for (_, func_name, _) in &tool_uses {
+                    for (_, func_name, args) in &tool_uses {
+                        accumulated.tool_calls.push(crate::models::ToolCallRecord {
+                            name: func_name.clone(),
+                            arguments: args.clone(),
+                        });
                         let _ = window.emit(
                             event_channel,
                             AgentProgress {
                                 stage: "tool_call".to_string(),
                                 tool_name: Some(func_name.clone()),
+                                tool_arguments: Some(args.clone()),
                                 iteration,
                             },
                         );
@@ -1420,23 +1606,20 @@ pub async fn cmd_agent_chat(
                         conversation_id: conv_id.as_deref(),
                     };
 
-                    let results = join_all(
-                        tool_uses
-                            .iter()
-                            .map(|(_, func_name, args)| registry.execute(func_name, args, &ctx)),
-                    )
-                    .await;
+                    let results = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            return Ok(emit_cancelled(&window, conv_id.as_deref(), iteration, &mut accumulated).await);
+                        }
+                        res = join_all(
+                            tool_uses
+                                .iter()
+                                .map(|(_, func_name, args)| registry.execute(func_name, args, &ctx)),
+                        ) => res,
+                    };
 
                     let mut tool_results: Vec<serde_json::Value> = Vec::new();
-                    let mut needs_cache_clear = false;
                     for ((tc_id, func_name, args), result) in tool_uses.into_iter().zip(results) {
-                        match func_name.as_str() {
-                            "add_edge" | "remove_edge" | "add_entity" | "remove_node" => {
-                                needs_cache_clear = true;
-                            }
-                            _ => {}
-                        }
-
                         tool_executions.push(ToolExecution {
                             tool_name: func_name.clone(),
                             arguments: args,
@@ -1448,6 +1631,7 @@ pub async fn cmd_agent_chat(
                             AgentProgress {
                                 stage: "tool_result".to_string(),
                                 tool_name: Some(func_name),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -1457,11 +1641,6 @@ pub async fn cmd_agent_chat(
                             "tool_use_id": tc_id,
                             "content": result,
                         }));
-                    }
-                    if needs_cache_clear {
-                        if let Ok(mut c) = cache.0.lock() {
-                            c.clear();
-                        }
                     }
 
                     messages.push(serde_json::json!({
@@ -1480,6 +1659,7 @@ pub async fn cmd_agent_chat(
                     AgentProgress {
                         stage: "done".to_string(),
                         tool_name: None,
+                        tool_arguments: None,
                         iteration,
                     },
                 );
@@ -1794,6 +1974,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                 AgentProgress {
                     stage: "thinking".to_string(),
                     tool_name: None,
+                    tool_arguments: None,
                     iteration,
                 },
             );
@@ -1868,6 +2049,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                         AgentProgress {
                             stage: "tool_call".to_string(),
                             tool_name: Some(tool_name.clone()),
+                            tool_arguments: None,
                             iteration,
                         },
                     );
@@ -1945,6 +2127,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                 AgentProgress {
                     stage: "done".to_string(),
                     tool_name: None,
+                    tool_arguments: None,
                     iteration,
                 },
             );
@@ -1960,6 +2143,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
             AgentProgress {
                 stage: "done".to_string(),
                 tool_name: None,
+                tool_arguments: None,
                 iteration,
             },
         );
@@ -1993,6 +2177,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
             AgentProgress {
                 stage: "thinking".to_string(),
                 tool_name: None,
+                tool_arguments: None,
                 iteration,
             },
         );
@@ -2037,6 +2222,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                                     retries,
                                     wait.as_secs()
                                 )),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -2058,6 +2244,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                                     retries,
                                     wait.as_secs()
                                 )),
+                                tool_arguments: None,
                                 iteration,
                             },
                         );
@@ -2130,12 +2317,13 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
                     })
                     .collect();
 
-                for (_, func_name, _) in &parsed {
+                for (_, func_name, args) in &parsed {
                     let _ = window.emit(
                         event_name,
                         AgentProgress {
                             stage: "tool_call".to_string(),
                             tool_name: Some(func_name.clone()),
+                            tool_arguments: Some(args.clone()),
                             iteration,
                         },
                     );
@@ -2213,6 +2401,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
             AgentProgress {
                 stage: "done".to_string(),
                 tool_name: None,
+                tool_arguments: None,
                 iteration,
             },
         );
@@ -2228,6 +2417,7 @@ IMPORTANT: Quality over quantity. Only recommend conversations that are genuinel
         AgentProgress {
             stage: "done".to_string(),
             tool_name: None,
+            tool_arguments: None,
             iteration,
         },
     );
@@ -2580,4 +2770,40 @@ pub fn cmd_save_kept_chat(
     }
 
     Ok(file_path)
+}
+
+/// Cancel an in-flight `cmd_agent_chat` for the given conversation.
+/// Idempotent — cancelling an unknown id is a no-op.
+#[tauri::command]
+pub fn cmd_agent_cancel(
+    state: tauri::State<'_, crate::commands::AgentCancelState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    if let Ok(map) = state.0.lock() {
+        if let Some(token) = map.get(&conversation_id) {
+            token.cancel();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    #[test]
+    fn partial_accumulator_round_trips_into_response_via_take() {
+        let mut acc = PartialAccumulator {
+            content: "Partial answer".into(),
+            reasoning: "Thinking step".into(),
+            tool_calls: vec![crate::models::ToolCallRecord {
+                name: "search_nodes".into(),
+                arguments: serde_json::json!({"q": "x"}),
+            }],
+        };
+        let content = std::mem::take(&mut acc.content);
+        assert_eq!(content, "Partial answer");
+        assert_eq!(acc.reasoning, "Thinking step");
+        assert_eq!(acc.tool_calls.len(), 1);
+    }
 }

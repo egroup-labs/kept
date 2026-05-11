@@ -3001,6 +3001,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 0.8.2",
  "tower-http",
  "uuid",
@@ -6176,6 +6177,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

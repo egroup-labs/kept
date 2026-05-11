@@ -55,6 +55,16 @@ pub struct Message {
     pub timestamp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<Attachment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallRecord>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub name: String,
+    pub arguments: serde_json::Value,
 }
 
 /// Stored conversation metadata (from DB)
@@ -350,6 +360,8 @@ pub struct AgentProgress {
     pub stage: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_arguments: Option<serde_json::Value>,
     pub iteration: u32,
 }
 

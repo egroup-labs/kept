@@ -281,6 +281,7 @@ function mockInvoke(cmd: string, _args?: Record<string, unknown>): unknown {
       tool_executions: [],
       iterations: 1,
     };
+    case 'cmd_agent_cancel': return undefined;
     case 'cmd_save_kept_chat': return '/mock/vault/kept/2026-03-10_mock-chat.md';
     case 'cmd_respond_code_consent': return undefined;
     case 'cmd_migrate_downloads': return 'Migrated 0 files (mock).';
@@ -648,6 +649,10 @@ export async function generateTitle(request: TitleRequest): Promise<string> {
 
 export async function agentChat(request: AgentChatRequest): Promise<AgentChatResponse> {
   return invoke('cmd_agent_chat', { request });
+}
+
+export async function agentCancel(conversationId: string): Promise<void> {
+  return invoke<void>('cmd_agent_cancel', { conversationId });
 }
 
 export async function saveKeptChat(payload: IngestPayload): Promise<string> {

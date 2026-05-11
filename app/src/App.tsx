@@ -20,7 +20,7 @@ import { CompactNav, useCompact } from "./components/SideNav";
 import Titlebar from "./components/Titlebar";
 import UpdateBanner from "./components/UpdateBanner";
 import { responsiveRadius, squirclePath } from "./lib/squircle";
-import { agentChat, cmdKgClassifyNewConversations, cmdKgGetGraph, cmdKgGetProjects, cmdKgGetTopicConversations, cmdKgLinkConversation, cmdSuggestProjectConversations, deleteConversation, generateTitle, getConfig, getConversation, getExtensionStatus, getExtensionZip, getVaultPath, isTauri, listConversations, listModels, refreshToken, renameConversation, requestExtensionSync, saveKeptChat, setConfig, stopExtensionSync } from "./lib/tauri-api";
+import { agentCancel, agentChat, cmdKgClassifyNewConversations, cmdKgGetGraph, cmdKgGetProjects, cmdKgGetTopicConversations, cmdKgLinkConversation, cmdSuggestProjectConversations, deleteConversation, generateTitle, getConfig, getConversation, getExtensionStatus, getExtensionZip, getVaultPath, isTauri, listConversations, listModels, refreshToken, renameConversation, requestExtensionSync, saveKeptChat, setConfig, stopExtensionSync } from "./lib/tauri-api";
 import { parseFrontmatter, parseMessages } from "./lib/markdown";
 import type {
   AppConfig,
@@ -85,6 +85,7 @@ type ChatUiMessage = {
   content: string;
   attachments?: ChatAttachment[];
   reasoning?: string;
+  toolCalls?: { name: string; arguments: unknown }[];
 };
 
 function buildChatModelOption(
@@ -642,6 +643,9 @@ export default function App() {
     setActivePageRaw(page);
   }, []);
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
+  const [spacerHeight, setSpacerHeight] = useState<number>(0);
+  const initialSpacerRef = useRef<number>(0);
+  const spacerSnapshotRef = useRef<number>(0);
   const { pending: pendingConsent, remaining: pendingConsentRemaining, respond: respondConsent } = useCodeConsentQueue();
   const [chatTitle, setChatTitle] = useState("New Chat");
   const chatConvId = useRef<string>(crypto.randomUUID());
@@ -1306,6 +1310,8 @@ export default function App() {
   const reasoningStreamFlushTimerRef = useRef<number | null>(null);
   const assistantReasoningRef = useRef("");
   const activeStreamConvIdRef = useRef<string | null>(null);
+  const pendingToolsRef = useRef<{ name: string; arguments: unknown }[]>([]);
+  const [pendingToolsVersion, setPendingToolsVersion] = useState(0);
 
   const setChatStatusIfChanged = useCallback((next: string | null) => {
     setChatStatus((prev) => {
@@ -1425,6 +1431,7 @@ export default function App() {
       const stop = await listen<{
         stage: string;
         tool_name?: string;
+        tool_arguments?: unknown;
         iteration: number;
         content_delta?: string;
         reasoning_delta?: string;
@@ -1438,6 +1445,11 @@ export default function App() {
           clearStreamingBuffer();
           clearVisibleAssistantContent();
           setChatStatusIfChanged(statusLabelForTool(tool_name));
+          pendingToolsRef.current = [
+            ...pendingToolsRef.current,
+            { name: tool_name, arguments: event.payload.tool_arguments ?? {} },
+          ];
+          setPendingToolsVersion((v) => v + 1);
         } else if (stage === "tool_result") {
           setChatStatusIfChanged("Thinking");
         } else if (stage === "thinking") {
@@ -1463,6 +1475,7 @@ export default function App() {
       unlisten?.();
     };
   }, [appendReasoningDelta, appendStreamingDelta, clearStreamingBuffer, clearVisibleAssistantContent, setChatStatusIfChanged]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<ChatContainerHandle>(null);
@@ -1531,14 +1544,20 @@ export default function App() {
     };
   }, []);
 
-  const persistChat = useCallback((allMessages: { role: string; content: string }[]) => {
+  const persistChat = useCallback((allMessages: ChatUiMessage[]) => {
     const now = new Date().toISOString();
     const payload: IngestPayload = {
       conversation_id: chatConvId.current,
       platform: "kept",
       title: chatTitleRef.current,
       model: chatModelRef.current,
-      messages: allMessages.map((m) => ({ role: m.role, content: m.content, timestamp: null })),
+      messages: allMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: null,
+        reasoning: m.reasoning ?? null,
+        tool_calls: m.toolCalls ?? null,
+      })),
       created_at: now,
       updated_at: now,
       markdown: null,
@@ -1547,6 +1566,52 @@ export default function App() {
     saveKeptChat(payload).catch((err) => console.warn("Failed to persist chat:", err));
   }, []);
 
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const stop = await listen<{
+        conversation_id?: string;
+        content?: string;
+        reasoning?: string;
+        tool_calls?: { name: string; arguments: unknown }[];
+      }>("agent-cancelled", (event) => {
+        const { conversation_id, content, reasoning, tool_calls } = event.payload;
+        if (conversation_id && activeStreamConvIdRef.current && conversation_id !== activeStreamConvIdRef.current) {
+          return;
+        }
+        flushReasoningStreamingBuffer();
+        flushStreamingBuffer();
+        const finalAssistant: ChatUiMessage = {
+          role: "assistant",
+          content: content ?? "",
+          reasoning: reasoning?.trim() || undefined,
+          toolCalls: tool_calls && tool_calls.length > 0 ? tool_calls : undefined,
+        };
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && (last.content === "" || last.content === finalAssistant.content)) {
+            const next = [...prev.slice(0, -1), finalAssistant];
+            persistChat(next);
+            return next;
+          }
+          const next = [...prev, finalAssistant];
+          persistChat(next);
+          return next;
+        });
+        setLoading(false);
+        activeStreamConvIdRef.current = null;
+        pendingToolsRef.current = [];
+        setPendingToolsVersion((v) => v + 1);
+      });
+      if (disposed) stop();
+      else unlisten = stop;
+    })();
+    return () => { disposed = true; unlisten?.(); };
+  }, [flushReasoningStreamingBuffer, flushStreamingBuffer, persistChat]);
+
   const handleSendMessage = async (text: string, model: string, attachments?: ChatAttachment[]) => {
     const isFirstMessage = messages.length === 0;
     const userMsg: ChatUiMessage = { role: "user", content: text, attachments };
@@ -1554,16 +1619,35 @@ export default function App() {
     const convId = chatConvId.current;
     clearStreamingBuffer();
     assistantReasoningRef.current = "";
+    pendingToolsRef.current = [];
+    setPendingToolsVersion((v) => v + 1);
     activeStreamConvIdRef.current = convId;
     setMessages(newMessages);
     setChatActive(true);
     setLoading(true);
+    requestAnimationFrame(() => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+      const lastUserEl = container.querySelector(
+        `[data-chat-msg-index="${newMessages.length - 1}"]`,
+      ) as HTMLElement | null;
+      const userMsgH = lastUserEl?.offsetHeight ?? 0;
+      const initial = Math.max(0, container.clientHeight - userMsgH - 80);
+      initialSpacerRef.current = initial;
+      setSpacerHeight(initial);
+
+      if (lastUserEl) {
+        const top = lastUserEl.offsetTop - 80;
+        container.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+      }
+    });
+    try { localStorage.removeItem(`kept_spacer_${convId}`); } catch { /* ignore */ }
 
     // Tracks the freshest message list across async callbacks (title-gen,
     // agent, error). Every save path reads from here so a late-resolving
     // title callback never overwrites a full (user + assistant) save with
     // its stale user-only copy.
-    let latestMessages: { role: string; content: string }[] = newMessages;
+    let latestMessages: ChatUiMessage[] = newMessages;
 
     const selectedModel = chatModelOptions.find((option) => option.id === model)
       ?? chatModelOptions[0]
@@ -1607,7 +1691,13 @@ export default function App() {
           platform: "kept",
           title,
           model: mapped.model,
-          messages: latestMessages.map((m) => ({ role: m.role, content: m.content, timestamp: null })),
+          messages: latestMessages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            timestamp: null,
+            reasoning: m.reasoning ?? null,
+            tool_calls: m.toolCalls ?? null,
+          })),
           created_at: now,
           updated_at: now,
           markdown: null,
@@ -1661,17 +1751,22 @@ export default function App() {
       flushStreamingBuffer();
       if (chatConvId.current !== convId) return;
       const reasoning = assistantReasoningRef.current.trim();
-      const allMessages = [
+      const allMessages: ChatUiMessage[] = [
         ...newMessages,
         {
           role: "assistant",
           content: result.content,
           reasoning: reasoning || undefined,
+          toolCalls: result.tool_executions.length > 0
+            ? result.tool_executions.map((t) => ({ name: t.tool_name, arguments: t.arguments }))
+            : undefined,
         },
       ];
       latestMessages = allMessages;
       setMessages(allMessages);
       persistChat(allMessages);
+      pendingToolsRef.current = [];
+      setPendingToolsVersion((v) => v + 1);
     } catch (err) {
       clearStreamingBuffer();
       if (chatConvId.current !== convId) return;
@@ -1685,6 +1780,9 @@ export default function App() {
       if (chatConvId.current === convId) {
         setLoading(false);
         activeStreamConvIdRef.current = null;
+        try {
+          localStorage.setItem(`kept_spacer_${convId}`, String(spacerSnapshotRef.current ?? 0));
+        } catch { /* ignore */ }
       }
     }
   };
@@ -1739,35 +1837,6 @@ export default function App() {
     updateChatActiveMsg();
   }, [updateChatActiveMsg]);
 
-  const scrollRaf = useRef(0);
-  useEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el) return;
-    setFadeBottom(false);
-    const start = el.scrollTop;
-    const target = el.scrollHeight - el.clientHeight;
-    const dist = target - start;
-    if (Math.abs(dist) < 2) return;
-    const duration = Math.min(600, 250 + Math.abs(dist) * 0.4);
-    const t0 = performance.now();
-    if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current);
-    const step = (now: number) => {
-      const elapsed = now - t0;
-      const p = Math.min(elapsed / duration, 1);
-      // ease-out cubic
-      const ease = 1 - (1 - p) ** 3;
-      el.scrollTop = start + dist * ease;
-      if (p < 1) {
-        scrollRaf.current = requestAnimationFrame(step);
-      } else {
-        scrollRaf.current = 0;
-        checkScroll();
-      }
-    };
-    scrollRaf.current = requestAnimationFrame(step);
-    return () => { if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current); };
-  }, [messages, loading, checkScroll]);
-
   useEffect(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
@@ -1779,6 +1848,29 @@ export default function App() {
     return () => observer.disconnect();
   }, [checkScroll]);
 
+  useEffect(() => { spacerSnapshotRef.current = spacerHeight; }, [spacerHeight]);
+
+  useEffect(() => {
+    if (!loading) return;
+    const lastIdx = messages.length - 1;
+    if (lastIdx < 0 || messages[lastIdx]?.role !== "assistant") return;
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const target = container.querySelector(
+      `[data-chat-msg-index="${lastIdx}"]`,
+    ) as HTMLElement | null;
+    if (!target) return;
+    const obs = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const h = entry.contentRect.height;
+      const next = Math.max(0, initialSpacerRef.current - h);
+      setSpacerHeight((prev) => (prev === next ? prev : next));
+    });
+    obs.observe(target);
+    return () => obs.disconnect();
+  }, [loading, messages]);
+
   // Recompute the rail's gap proportions when message content changes
   // (covers new messages and streaming token updates).
   useEffect(() => {
@@ -1786,11 +1878,17 @@ export default function App() {
     updateChatActiveMsg();
   }, [messages, updateChatActiveMsg]);
 
+  const handleStop = useCallback(() => {
+    const convId = activeStreamConvIdRef.current ?? chatConvId.current;
+    agentCancel(convId).catch((err) => console.warn("Failed to cancel agent:", err));
+  }, []);
+
   const handleNewChat = useCallback(() => {
     clearStreamingBuffer();
     assistantReasoningRef.current = "";
     activeStreamConvIdRef.current = null;
     setMessages([]);
+    setSpacerHeight(0);
     setChatTitle("New Chat");
     chatTitleRef.current = "New Chat";
     chatConvId.current = crypto.randomUUID();
@@ -1799,11 +1897,22 @@ export default function App() {
     setLoading(false);
   }, [clearStreamingBuffer]);
 
-  const handleContinueChat = useCallback((msgs: { role: string; content: string }[], title: string, conversationId?: string) => {
+  const handleContinueChat = useCallback((
+    msgs: { role: string; content: string; reasoning?: string; toolCalls?: { name: string; arguments: unknown }[] }[],
+    title: string,
+    conversationId?: string,
+  ) => {
     clearStreamingBuffer();
     assistantReasoningRef.current = "";
     activeStreamConvIdRef.current = null;
-    setMessages(msgs.map(m => ({ role: m.role, content: m.content })));
+    setMessages(msgs.map(m => ({
+      role: m.role,
+      content: m.content,
+      reasoning: m.reasoning,
+      toolCalls: m.toolCalls,
+    })));
+    const stored = Number.parseInt(localStorage.getItem(`kept_spacer_${conversationId || ''}`) ?? '0', 10);
+    setSpacerHeight(Number.isFinite(stored) ? stored : 0);
     setChatTitle(title);
     chatTitleRef.current = title;
     chatConvId.current = conversationId || crypto.randomUUID();
@@ -2106,6 +2215,11 @@ export default function App() {
                       content={msg.content}
                       attachments={msg.attachments}
                       reasoning={msg.reasoning}
+                      toolCalls={
+                        loading && i === messages.length - 1 && msg.role === "assistant"
+                          ? (pendingToolsVersion >= 0 ? pendingToolsRef.current : pendingToolsRef.current)
+                          : msg.toolCalls
+                      }
                       streaming={loading && i === messages.length - 1 && msg.role === "assistant"}
                       thinkingActive={loading && i === messages.length - 1 && msg.role === "assistant" && !!msg.reasoning?.trim() && !msg.content.trim()}
                     />
@@ -2145,6 +2259,12 @@ export default function App() {
                     </span>
                   </div>
                 )}
+                {spacerHeight > 0 && (
+                  <div
+                    aria-hidden
+                    style={{ height: spacerHeight, flexShrink: 0 }}
+                  />
+                )}
                 <div ref={messagesEndRef} />
               </div>
             </div>
@@ -2174,6 +2294,7 @@ export default function App() {
               <ChatContainer
                 ref={chatRef}
                 onSendMessage={handleSendMessage}
+                onStop={handleStop}
                 loading={loading}
                 models={chatModelOptions}
                 preferredModelIds={preferredChatModelIds}
