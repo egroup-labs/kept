@@ -207,6 +207,22 @@ pub struct AppConfig {
     /// RFC3339 timestamp of the last successful Obsidian export (manual or auto).
     #[serde(default)]
     pub obsidian_last_sync_at: Option<String>,
+    /// When true, the idle digest summarizer is paused and will not call any
+    /// LLM provider until the user explicitly resumes it via
+    /// `cmd_resume_idle_summarizer`. Set automatically after a sustained
+    /// failure window (see `idle_summarizer_auto_halt_days`) so a misconfigured
+    /// or rate-limited API key can't keep draining credit while the app is
+    /// unattended. Treat None as "not halted".
+    #[serde(default)]
+    pub idle_summarizer_halted: Option<bool>,
+    /// RFC3339 timestamp of when the idle summarizer was last auto-halted.
+    /// Surfaced to the UI so users can see *why* the summarizer stopped.
+    #[serde(default)]
+    pub idle_summarizer_halted_at: Option<String>,
+    /// Number of days of all-failing ticks before auto-halt triggers.
+    /// Default 3. Set to 0 to disable auto-halt entirely (not recommended).
+    #[serde(default)]
+    pub idle_summarizer_auto_halt_days: Option<i64>,
 }
 
 impl Default for AppConfig {
@@ -257,6 +273,9 @@ impl Default for AppConfig {
             primary_provider: None,
             kb_paths: None,
             fs_allowed_paths: dirs::home_dir().map(|h| vec![h.to_string_lossy().to_string()]),
+            idle_summarizer_halted: None,
+            idle_summarizer_halted_at: None,
+            idle_summarizer_auto_halt_days: None,
             digest_auto_summarize: None,
             last_digest_auto_run: None,
             digest_auto_run_interval_minutes: None,

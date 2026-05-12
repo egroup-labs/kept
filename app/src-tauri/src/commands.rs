@@ -1519,9 +1519,14 @@ async fn call_anthropic_digest(model: &str, api_key: &str, prompt: &str) -> Resu
         "max_tokens": 2048,
         "messages": [{"role": "user", "content": prompt}]
     });
+    // KEPT_ANTHROPIC_BASE_URL lets us point the digest path at a local mock
+    // server for rate-limit / burn-rate testing (see scripts/mock-anthropic-429.py).
+    // Production code path is unchanged when the variable is unset.
+    let url = std::env::var("KEPT_ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://api.anthropic.com/v1/messages".to_string());
     let client = reqwest::Client::new();
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(&url)
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("Content-Type", "application/json")
@@ -2394,53 +2399,201 @@ pub async fn cmd_refresh_digest(
     enrich_digest_items(&db, &kg, items).await
 }
 
+/// Per-tick outcome counts. Surfaced to the spawn loop so it can drive a
+/// circuit breaker that pauses the summarizer when the user's API is rate
+/// limited — without this signal, the loop would keep grinding once a minute
+/// and bill the user's key for every conversation that does squeak past the
+/// limit. Field totals satisfy: ok + rate_limited + other_failed + skipped = attempted.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IdleSummarizerTickStats {
+    pub ok: usize,
+    pub rate_limited: usize,
+    pub other_failed: usize,
+    pub skipped: usize,
+}
+
+/// Classify an LLM error string into a coarse kind we can use for retry-window
+/// sizing and for the circuit breaker. Matching is string-based because the
+/// per-provider `call_*_digest` helpers all collapse the response into a single
+/// `Result<String, String>` of the form "<Provider> ... error <status>: <body>".
+/// HTTP 429 is the rate-limit signal across all three providers.
+fn classify_digest_error(err: &str) -> &'static str {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains(" 429")
+        || lower.contains("rate_limit")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+    {
+        "rate_limit"
+    } else if lower.contains("context length")
+        || lower.contains("context_length")
+        || lower.contains("too many tokens")
+        || lower.contains("maximum context")
+        || lower.contains(" 413")
+    {
+        "context_length"
+    } else if lower.contains(" 401") || lower.contains(" 403") || lower.contains("unauthorized") {
+        "auth"
+    } else if lower.contains("timed out") || lower.contains("timeout") || lower.contains(" 5") {
+        "transient"
+    } else {
+        "other"
+    }
+}
+
+/// Pick a (base, max) retry window for a failed summary attempt. The actual
+/// per-attempt window is `min(base × 2^(failure_count − 1), max)` — see
+/// `db::exponential_backoff_minutes`.
+///
+/// Reasoning per kind:
+/// - **rate_limit**: tier limits usually clear in a minute, but if a vault
+///   chronically overflows the user's TPM the retries should back off fast.
+///   Base 30min, cap 6h.
+/// - **transient**: network/5xx hiccups. Start short (15min), cap at 3h.
+/// - **context_length**: deterministic; the conversation is bigger than what
+///   we'll send. Cheap to retry rarely, no value in retrying often. Base 1d,
+///   cap 7d.
+/// - **auth**: only fixes by user changing the key. Hold flat at 1d.
+/// - **other**: unknown. Base 1h, cap 24h.
+fn retry_window_for_error(kind: &str) -> (i64, i64) {
+    match kind {
+        "rate_limit" => (30, 6 * 60),
+        "transient" => (15, 3 * 60),
+        "context_length" => (24 * 60, 7 * 24 * 60),
+        "auth" => (24 * 60, 24 * 60),
+        _ => (60, 24 * 60),
+    }
+}
+
+/// Default window (in days) after which the idle summarizer auto-halts if no
+/// successful summary has been produced. Configurable via
+/// `AppConfig.idle_summarizer_auto_halt_days`; set to 0 to disable.
+const AUTO_HALT_DEFAULT_DAYS: i64 = 3;
+
+/// Pure date-math helper: was the bad-state started at `started_rfc3339` more
+/// than `halt_days` ago, relative to `now`? Returns false on parse failure
+/// (safe default — never auto-halt on garbled data). Extracted so it can be
+/// unit-tested without a DB or wall-clock dependency.
+fn should_auto_halt(started_rfc3339: &str, now: chrono::DateTime<chrono::Utc>, halt_days: i64) -> bool {
+    if halt_days <= 0 {
+        return false;
+    }
+    match chrono::DateTime::parse_from_rfc3339(started_rfc3339) {
+        Ok(started) => {
+            let elapsed = now.signed_duration_since(started.with_timezone(&chrono::Utc));
+            elapsed >= chrono::Duration::days(halt_days)
+        }
+        Err(_) => false,
+    }
+}
+
 /// Background idle summarizer — finds conversations that have been inactive
 /// for `idle_minutes` (default 5) and have no digest_items row yet, then runs
 /// the LLM summary pipeline and stores the judgment with status='pending'.
-/// Capped per invocation to avoid rate-limit bursts.
+///
+/// Per-tick caps + an inter-call delay keep the burst under typical hosted-LLM
+/// input-TPM limits (Anthropic tier 1 is 30K input tokens/minute). With a 12K
+/// char markdown truncation in `build_summary_prompt` (~3K tokens/call) the
+/// numbers below give roughly 4 calls every ~25s ≈ ~12K input tokens/min —
+/// well clear of the tier-1 cap and leaves room for other API users on the key.
+///
+/// Three nested guardrails govern execution:
+///   1. `digest_auto_summarize == Some(false)` — user opt-out, never run.
+///   2. `idle_summarizer_halted == Some(true)` — auto-halted (or manually
+///      halted), require `cmd_resume_idle_summarizer` to resume.
+///   3. If we've been in a purely-failing state for >= halt_days, FLIP the
+///      halted flag in config and return — the next tick (and all subsequent)
+///      will short-circuit on (2) until the user resumes.
 pub async fn run_idle_summarizer(
     db: Arc<Database>,
     kg: Arc<crate::kg_gen::kggen::KgDatabase>,
-) -> Result<usize, String> {
+) -> Result<IdleSummarizerTickStats, String> {
     let cfg = config::read_config().unwrap_or_default();
     if cfg.digest_auto_summarize == Some(false) {
-        return Ok(0);
+        return Ok(IdleSummarizerTickStats::default());
     }
+    if cfg.idle_summarizer_halted == Some(true) {
+        return Ok(IdleSummarizerTickStats::default());
+    }
+
+    // Auto-halt gate: if we've been failing for too long, persist the halt
+    // flag and return. We DO this check before pulling candidates so we
+    // short-circuit before any LLM calls.
+    let halt_days = cfg
+        .idle_summarizer_auto_halt_days
+        .unwrap_or(AUTO_HALT_DEFAULT_DAYS);
+    if halt_days > 0 {
+        if let Ok((_, Some(bad_start))) = db.idle_summarizer_health() {
+            if should_auto_halt(&bad_start, chrono::Utc::now(), halt_days) {
+                let mut cfg_w = cfg.clone();
+                cfg_w.idle_summarizer_halted = Some(true);
+                cfg_w.idle_summarizer_halted_at = Some(chrono::Utc::now().to_rfc3339());
+                if let Err(e) = config::write_config(&cfg_w) {
+                    log::error!(
+                        "Failed to persist idle summarizer halt flag: {}. Continuing in-memory only.",
+                        e
+                    );
+                }
+                log::warn!(
+                    "Idle summarizer auto-halted: no successful summary in {} days \
+                     (bad state began {}). Manual resume required via \
+                     cmd_resume_idle_summarizer.",
+                    halt_days,
+                    bad_start
+                );
+                return Ok(IdleSummarizerTickStats::default());
+            }
+        }
+    }
+
     const IDLE_MINUTES: i64 = 5;
-    const PER_TICK_CAP: i64 = 10;
+    const PER_TICK_CAP: i64 = 4;
+    const PER_CALL_DELAY: std::time::Duration = std::time::Duration::from_secs(6);
 
     let candidates = db.get_idle_unsummarized_conversations(IDLE_MINUTES, PER_TICK_CAP)?;
     if candidates.is_empty() {
-        return Ok(0);
+        return Ok(IdleSummarizerTickStats::default());
     }
 
-    let mut summarized = 0usize;
-    for (conv_id, title, file_path) in candidates {
+    let mut stats = IdleSummarizerTickStats::default();
+    for (idx, (conv_id, title, file_path)) in candidates.iter().enumerate() {
+        // Inter-call throttle. Between calls only — the first call fires
+        // immediately. This caps the burst rate at ~10 calls/min even before
+        // PER_TICK_CAP would.
+        if idx > 0 {
+            tokio::time::sleep(PER_CALL_DELAY).await;
+        }
         // Skip if kg_summary already exists (belt-and-suspenders)
-        if let Ok(Some(_)) = kg.get_summary(&conv_id) {
+        if let Ok(Some(_)) = kg.get_summary(conv_id) {
             // Still insert a digest_items judgment row so it can be promoted later.
             // We don't have is_unresolved in kg_summary (lives in digest_items), so
             // just mark the row so it isn't re-picked next tick.
-            let _ = db.upsert_digest_judgment(&conv_id, None, None, None);
+            let _ = db.upsert_digest_judgment(conv_id, None, None, None);
+            stats.skipped += 1;
             continue;
         }
-        let markdown = match vault::read_conversation(&file_path) {
+        let markdown = match vault::read_conversation(file_path) {
             Ok(md) => md,
             Err(e) => {
                 eprintln!("[digest] idle vault read failed for {}: {}", conv_id, e);
+                // I/O failure is not an LLM failure — record it so we don't
+                // re-read a missing file every minute, but tag it distinctly.
+                let (base, max) = retry_window_for_error("other");
+                let _ = db.record_digest_attempt_failed(conv_id, "vault_io", base, max);
+                stats.other_failed += 1;
                 continue;
             }
         };
-        match generate_and_store_summary(&kg, &conv_id, &title, &markdown, &cfg).await {
+        match generate_and_store_summary(&kg, conv_id, title, &markdown, &cfg).await {
             Ok(summary) => {
-                summarized += 1;
+                stats.ok += 1;
                 let ar = if summary.attention_reason.is_empty() {
                     None
                 } else {
                     Some(summary.attention_reason.as_str())
                 };
                 let _ = db.upsert_digest_judgment(
-                    &conv_id,
+                    conv_id,
                     Some(summary.summary.as_str()),
                     Some(summary.is_unresolved),
                     ar,
@@ -2451,11 +2604,31 @@ pub async fn run_idle_summarizer(
                 );
             }
             Err(e) => {
-                eprintln!("[digest] idle summary FAILED for {}: {}", conv_id, e);
+                let kind = classify_digest_error(&e);
+                let (base, max) = retry_window_for_error(kind);
+                match db.record_digest_attempt_failed(conv_id, kind, base, max) {
+                    Ok((applied, count)) => {
+                        eprintln!(
+                            "[digest] idle summary FAILED for {} (kind={}, failure #{}, retry_in={}min): {}",
+                            conv_id, kind, count, applied, e
+                        );
+                    }
+                    Err(db_err) => {
+                        eprintln!(
+                            "[digest] idle summary FAILED for {} (kind={}): {} (also failed to record: {})",
+                            conv_id, kind, e, db_err
+                        );
+                    }
+                }
+                if kind == "rate_limit" {
+                    stats.rate_limited += 1;
+                } else {
+                    stats.other_failed += 1;
+                }
             }
         }
     }
-    Ok(summarized)
+    Ok(stats)
 }
 
 /// Scheduled batch promoter — flips 'pending' + is_unresolved=true rows to
@@ -3690,6 +3863,54 @@ pub fn cmd_validate_path(path: String) -> Result<bool, String> {
     Ok(std::path::Path::new(&path).is_dir())
 }
 
+/// Status snapshot for the idle summarizer. Used by the UI to render a
+/// "summarizer paused" banner with a resume button.
+#[derive(serde::Serialize)]
+pub struct IdleSummarizerStatus {
+    pub halted: bool,
+    pub halted_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub bad_state_started_at: Option<String>,
+    pub auto_halt_days: i64,
+    pub digest_auto_summarize: bool,
+}
+
+/// Read the current state of the idle summarizer: halt flag, last success,
+/// and bad-state start. Cheap — one DB read plus one config read.
+#[tauri::command]
+pub fn cmd_idle_summarizer_status(
+    db: State<'_, DbState>,
+) -> Result<IdleSummarizerStatus, String> {
+    let cfg = config::read_config().unwrap_or_default();
+    let (last_success_at, bad_state_started_at) = with_db(&db, |d| d.idle_summarizer_health())?;
+    Ok(IdleSummarizerStatus {
+        halted: cfg.idle_summarizer_halted == Some(true),
+        halted_at: cfg.idle_summarizer_halted_at,
+        last_success_at,
+        bad_state_started_at,
+        auto_halt_days: cfg
+            .idle_summarizer_auto_halt_days
+            .unwrap_or(AUTO_HALT_DEFAULT_DAYS),
+        digest_auto_summarize: cfg.digest_auto_summarize != Some(false),
+    })
+}
+
+/// Clear the halted flag so the background loop resumes on the next tick.
+/// Does not retroactively retry rows whose backoff window has not yet
+/// elapsed — those will re-enter the queue naturally once `next_retry_at`
+/// passes. Returns the new status snapshot.
+#[tauri::command]
+pub fn cmd_resume_idle_summarizer(
+    db: State<'_, DbState>,
+) -> Result<IdleSummarizerStatus, String> {
+    let mut cfg = config::read_config().unwrap_or_default();
+    cfg.idle_summarizer_halted = Some(false);
+    cfg.idle_summarizer_halted_at = None;
+    config::write_config(&cfg).map_err(|e| format!("Failed to clear halt flag: {}", e))?;
+    log::info!("Idle summarizer resumed by user");
+    cmd_idle_summarizer_status(db)
+}
+
 /// Respond to a pending code-execution consent request.
 #[tauri::command]
 pub fn cmd_respond_code_consent(
@@ -3703,5 +3924,89 @@ pub fn cmd_respond_code_consent(
         Ok(())
     } else {
         Err(format!("No pending consent request: {}", request_id))
+    }
+}
+
+#[cfg(test)]
+mod idle_summarizer_tests {
+    use super::{classify_digest_error, retry_window_for_error, should_auto_halt};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn auto_halt_disabled_when_days_is_zero() {
+        let started = (Utc::now() - Duration::days(30)).to_rfc3339();
+        assert!(!should_auto_halt(&started, Utc::now(), 0));
+    }
+
+    #[test]
+    fn auto_halt_disabled_when_days_is_negative() {
+        let started = (Utc::now() - Duration::days(30)).to_rfc3339();
+        assert!(!should_auto_halt(&started, Utc::now(), -1));
+    }
+
+    #[test]
+    fn auto_halt_triggers_exactly_at_window() {
+        let now = Utc::now();
+        let started = (now - Duration::days(3)).to_rfc3339();
+        assert!(should_auto_halt(&started, now, 3));
+    }
+
+    #[test]
+    fn auto_halt_does_not_trigger_before_window() {
+        let now = Utc::now();
+        // Just shy of 3 days
+        let started = (now - Duration::days(3) + Duration::minutes(1)).to_rfc3339();
+        assert!(!should_auto_halt(&started, now, 3));
+    }
+
+    #[test]
+    fn auto_halt_triggers_well_past_window() {
+        let now = Utc::now();
+        let started = (now - Duration::days(10)).to_rfc3339();
+        assert!(should_auto_halt(&started, now, 3));
+    }
+
+    #[test]
+    fn auto_halt_safe_on_garbled_timestamp() {
+        // Parse failure must not panic and must NOT auto-halt — a corrupted
+        // DB value should never be the trigger that disables the feature.
+        assert!(!should_auto_halt("not-a-timestamp", Utc::now(), 3));
+        assert!(!should_auto_halt("", Utc::now(), 3));
+    }
+
+    // Real error strings from the per-provider call_*_digest helpers. If a
+    // helper's format changes (status code, body framing), update these — the
+    // circuit breaker only fires on errors classified as "rate_limit".
+    #[test]
+    fn classifies_anthropic_429_as_rate_limit() {
+        let err = "Anthropic digest error 429 Too Many Requests: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your organization's rate limit of 30,000 input tokens per minute\"}}";
+        assert_eq!(classify_digest_error(err), "rate_limit");
+        assert_eq!(retry_window_for_error("rate_limit"), (30, 6 * 60));
+    }
+
+    #[test]
+    fn classifies_openai_rate_limit() {
+        let err = "OpenAI digest error 429: rate_limit_exceeded";
+        assert_eq!(classify_digest_error(err), "rate_limit");
+    }
+
+    #[test]
+    fn classifies_context_length_overflow() {
+        let err = "Anthropic digest error 400: {\"error\":{\"message\":\"prompt is too long: 250000 tokens > 200000 maximum context length\"}}";
+        assert_eq!(classify_digest_error(err), "context_length");
+    }
+
+    #[test]
+    fn classifies_auth_failure() {
+        let err = "Anthropic digest error 401: Unauthorized";
+        assert_eq!(classify_digest_error(err), "auth");
+        let (base, max) = retry_window_for_error("auth");
+        assert_eq!((base, max), (24 * 60, 24 * 60));
+    }
+
+    #[test]
+    fn unknown_falls_through_to_other() {
+        assert_eq!(classify_digest_error("some weird stringified panic"), "other");
+        assert_eq!(retry_window_for_error("other"), (60, 24 * 60));
     }
 }

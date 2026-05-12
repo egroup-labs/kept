@@ -8,6 +8,21 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+/// Exponential backoff schedule for a failed digest attempt.
+/// Returns `min(base × 2^(count − 1), max)` saturating at `i64::MAX`. Negative
+/// or zero counts collapse to `base.min(max)`. The bit shift is clamped at 30
+/// so `1 << shift` never overflows even for absurd counts.
+pub(crate) fn exponential_backoff_minutes(base: i64, max: i64, failure_count: i64) -> i64 {
+    let base = base.max(0);
+    let max = max.max(base);
+    if failure_count <= 1 {
+        return base.min(max);
+    }
+    let shift = (failure_count - 1).clamp(0, 30) as u32;
+    let multiplier = 1_i64 << shift;
+    base.saturating_mul(multiplier).min(max)
+}
+
 fn normalize_fts_query(query: &str) -> String {
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -87,6 +102,9 @@ impl Database {
             ("is_unresolved", "INTEGER"),
             ("attention_reason", "TEXT"),
             ("seen_at", "TEXT"),
+            ("next_retry_at", "TEXT"),
+            ("error_kind", "TEXT"),
+            ("failure_count", "INTEGER"),
         ] {
             let exists: bool = conn
                 .prepare(&format!("SELECT {} FROM digest_items LIMIT 0", col))
@@ -485,11 +503,24 @@ impl Database {
         limit: i64,
     ) -> Result<Vec<(String, String, String)>, String> {
         let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        // A conversation is eligible for the idle summarizer if EITHER:
+        //   - it has no digest_items row at all (never attempted), OR
+        //   - its row is marked status='error' AND next_retry_at has elapsed
+        //     (failed attempt whose backoff window has passed).
+        // Any other status — 'pending', 'active', 'snoozed', 'dismissed' — means
+        // we already produced a summary (or the user managed the row) and we
+        // must NOT re-bill the user's API by re-summarizing. Without this guard,
+        // a failure that returned an error from the LLM left the row absent,
+        // causing the 60s loop to re-attempt forever.
         let mut stmt = conn.prepare(
             "SELECT c.conversation_id, c.title, c.file_path
              FROM conversations c
              LEFT JOIN digest_items d ON d.conversation_id = c.conversation_id
-             WHERE d.conversation_id IS NULL
+             WHERE (
+                   d.conversation_id IS NULL
+                OR (d.status = 'error'
+                    AND (d.next_retry_at IS NULL OR d.next_retry_at <= datetime('now')))
+             )
                AND c.message_count > 0
                AND (julianday('now') - julianday(COALESCE(c.updated_at, c.created_at))) * 24 * 60 >= ?1
                AND julianday('now') - julianday(COALESCE(c.updated_at, c.created_at)) <= 30
@@ -504,6 +535,119 @@ impl Database {
             out.push(r.map_err(|e| format!("Row error: {}", e))?);
         }
         Ok(out)
+    }
+
+    /// Record that the idle summarizer tried to summarize this conversation and
+    /// failed. Inserts a digest_items row with status='error' so the idle queue
+    /// stops re-picking it for at least the computed retry window.
+    ///
+    /// Retry windows grow exponentially per consecutive failure on the same
+    /// conversation: `min(base × 2^(failure_count − 1), max)`. The first
+    /// failure waits `base`, the second `2·base`, the third `4·base`, and so
+    /// on, until the per-kind cap. This keeps a permanently broken
+    /// conversation (e.g. one that always 429s on the user's tier, or always
+    /// overflows context) from re-burning the API every hour — after a few
+    /// failures it falls back to retrying once a day or less.
+    ///
+    /// Returns `(applied_minutes, new_failure_count)` so callers can log what
+    /// they actually committed.
+    ///
+    /// `error_kind` is a short tag like "rate_limit", "context_length",
+    /// "auth", "transient" — surfaced for diagnostics, not user-facing.
+    pub fn record_digest_attempt_failed(
+        &self,
+        conversation_id: &str,
+        error_kind: &str,
+        base_retry_minutes: i64,
+        max_retry_minutes: i64,
+    ) -> Result<(i64, i64), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        // Read the prior failure count for THIS conversation. Other status
+        // values ('active', 'snoozed', 'pending', 'dismissed') wouldn't be
+        // selected by the idle summarizer in the first place, so they should
+        // never reach here — but if they do, we treat the prior count as 0 so
+        // we don't trample over their state.
+        let prior_count: i64 = conn
+            .query_row(
+                "SELECT COALESCE(failure_count, 0) FROM digest_items
+                 WHERE conversation_id = ?1 AND status = 'error'",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Read failure_count error: {}", e))?
+            .unwrap_or(0);
+        let new_count = prior_count + 1;
+        let applied = exponential_backoff_minutes(base_retry_minutes, max_retry_minutes, new_count);
+
+        conn.execute(
+            "INSERT INTO digest_items
+                 (conversation_id, status, reason, error_kind, next_retry_at, failure_count)
+             VALUES (?1, 'error', 'summary_failed', ?2,
+                     datetime('now', ?3), ?4)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+               status        = CASE
+                                 WHEN digest_items.status IN ('active','snoozed','dismissed','pending')
+                                   THEN digest_items.status
+                                 ELSE 'error'
+                               END,
+               error_kind    = excluded.error_kind,
+               next_retry_at = excluded.next_retry_at,
+               failure_count = excluded.failure_count,
+               updated_at    = datetime('now')",
+            params![
+                conversation_id,
+                error_kind,
+                format!("+{} minutes", applied),
+                new_count,
+            ],
+        ).map_err(|e| format!("Record digest failure error: {}", e))?;
+        Ok((applied, new_count))
+    }
+
+    /// Return the timestamp at which the idle summarizer entered a
+    /// "purely failing" state — defined as the earliest `digest_items` error
+    /// row updated since the most recent successful summary (or all-time if
+    /// no successful summary exists yet). Returns `None` if there are no
+    /// outstanding error rows.
+    ///
+    /// Used by the auto-halt logic: if this timestamp is older than the
+    /// configured halt window, the loop stops calling LLM providers.
+    ///
+    /// Returns a tuple of (last_success_at, bad_state_started_at) so callers
+    /// don't need a second round-trip to render the diagnostic.
+    pub fn idle_summarizer_health(&self) -> Result<(Option<String>, Option<String>), String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        // MAX/MIN over zero rows in SQLite returns a single NULL row, not "no
+        // rows" — so query_row succeeds and we just need to read it as
+        // Option<String>.
+        let last_success: Option<String> = conn
+            .query_row(
+                "SELECT MAX(updated_at) FROM digest_items WHERE summary IS NOT NULL",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| format!("Read last success error: {}", e))?;
+
+        let bad_start: Option<String> = match &last_success {
+            Some(ts) => conn
+                .query_row(
+                    "SELECT MIN(updated_at) FROM digest_items
+                     WHERE status = 'error' AND updated_at > ?1",
+                    params![ts],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(|e| format!("Read bad-state-start error: {}", e))?,
+            None => conn
+                .query_row(
+                    "SELECT MIN(updated_at) FROM digest_items WHERE status = 'error'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(|e| format!("Read bad-state-start error: {}", e))?,
+        };
+
+        Ok((last_success, bad_start))
     }
 
     /// Promote summarized-and-unresolved pending items into visible ('active') state.
@@ -660,12 +804,50 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_fts_query;
+    use super::{exponential_backoff_minutes, normalize_fts_query};
 
     #[test]
     fn normalizes_free_form_search_into_safe_fts_terms() {
         assert_eq!(normalize_fts_query("file:test"), "file AND test");
         assert_eq!(normalize_fts_query("Claude - file:path"), "claude AND file AND path");
         assert_eq!(normalize_fts_query("   "), "");
+    }
+
+    #[test]
+    fn first_failure_uses_base_window() {
+        assert_eq!(exponential_backoff_minutes(30, 6 * 60, 1), 30);
+    }
+
+    #[test]
+    fn windows_double_per_consecutive_failure() {
+        // base=30, max=6h=360 → 30, 60, 120, 240, capped at 360
+        assert_eq!(exponential_backoff_minutes(30, 360, 1), 30);
+        assert_eq!(exponential_backoff_minutes(30, 360, 2), 60);
+        assert_eq!(exponential_backoff_minutes(30, 360, 3), 120);
+        assert_eq!(exponential_backoff_minutes(30, 360, 4), 240);
+        assert_eq!(exponential_backoff_minutes(30, 360, 5), 360);
+        assert_eq!(exponential_backoff_minutes(30, 360, 6), 360);
+    }
+
+    #[test]
+    fn caps_at_max_for_high_counts() {
+        // A conversation that has failed 50 times should be retried at max,
+        // not produce arithmetic overflow or panic.
+        assert_eq!(exponential_backoff_minutes(60, 24 * 60, 50), 24 * 60);
+    }
+
+    #[test]
+    fn auth_fixed_window_when_base_equals_max() {
+        // For auth failures we configure base == max (no exponential), so the
+        // retry window is constant regardless of count.
+        let day = 24 * 60;
+        assert_eq!(exponential_backoff_minutes(day, day, 1), day);
+        assert_eq!(exponential_backoff_minutes(day, day, 7), day);
+    }
+
+    #[test]
+    fn zero_or_negative_count_falls_back_to_base() {
+        assert_eq!(exponential_backoff_minutes(30, 360, 0), 30);
+        assert_eq!(exponential_backoff_minutes(30, 360, -5), 30);
     }
 }
