@@ -1,4 +1,8 @@
+
 # Kept
+
+<a href="https://www.producthunt.com/products/kept-ai-on-your-local-conversations?utm_source=badge-follow&utm_medium=badge&utm_source=badge-kept&#0045;ai&#0045;on&#0045;your&#0045;local&#0045;conversations" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/follow.svg?product_id=1228638&theme=neutral" alt="Kept - Your&#0032;AI&#0032;chats&#0044;&#0032;saved&#0032;as&#0032;Markdown&#0032;locally&#0032;with&#0032;no&#0032;cloud | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+
 
 <p align="center">
   <img src="demo.gif" alt="Kept archival illustration" width="100%" style="border-radius:20px;">
