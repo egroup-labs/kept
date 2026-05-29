@@ -37,24 +37,33 @@ async function getClaudeOrgId(signal = null) {
 async function fetchClaudeConversations(orgId, signal = null) {
     const allConversations = [];
     let cursor = null;
+    let offset = 0;
     let page = 0;
 
     do {
         let url = `https://claude.ai/api/organizations/${orgId}/chat_conversations?limit=${CLAUDE_PAGE_SIZE}`;
         if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
+        else if (offset > 0) url += `&offset=${offset}`;
+
         const resp = await rateLimitedFetch(url, { headers: CLAUDE_HEADERS, signal });
         const data = await resp.json();
 
-        // The API may return a flat array (no pagination) or an object with { conversations, cursor }
         const items = Array.isArray(data) ? data : (data.conversations || data.items || []);
         dbg(`Claude conversations page ${++page}:`, items.length, "items");
         if (items.length === 0) break;
 
         allConversations.push(...items);
 
-        // Extract next cursor from response object; flat arrays have no cursor
-        cursor = Array.isArray(data) ? null : (data.cursor || data.nextCursor || null);
-    } while (cursor && page < CLAUDE_MAX_PAGES);
+        if (Array.isArray(data)) {
+            // Offset-based pagination: a full page implies there may be more
+            if (items.length < CLAUDE_PAGE_SIZE) break;
+            offset += items.length;
+            cursor = null;
+        } else {
+            cursor = data.cursor || data.nextCursor || null;
+            if (!cursor) break;
+        }
+    } while (page < CLAUDE_MAX_PAGES);
 
     dbg("Claude total conversations fetched:", allConversations.length);
     return allConversations;
